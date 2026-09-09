@@ -4,7 +4,7 @@
   <p><strong>A little space for your numbers.</strong></p>
   <p>A native, offline calculator with an editable tape.<br>Keep the calculation, the context, and the answer together.</p>
   <p>
-    <a href="https://github.com/tsubaie/numpad/actions/workflows/build.yml"><img src="https://github.com/tsubaie/numpad/actions/workflows/build.yml/badge.svg?branch=codex%2Fmain" alt="Native builds"></a>
+    <a href="https://github.com/tsubaie/numpad/actions/workflows/build.yml"><img src="https://github.com/tsubaie/numpad/actions/workflows/build.yml/badge.svg?branch=main" alt="Native builds"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-a6e3a1" alt="MIT license"></a>
     <img src="https://img.shields.io/badge/built_with-Rust_%2B_Iced-cba6f7" alt="Built with Rust and Iced">
   </p>
