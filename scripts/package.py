@@ -67,7 +67,7 @@ def linux_packages(binary, output, work, ver):
                                "libxcb1", "libxcursor1", "libxi6", "libxrandr2", "fontconfig"],
                     "recommends": ["xdg-desktop-portal"]},
             "rpm": {"depends": ["glibc >= 2.35", "libgcc", "libxkbcommon",
-                               "libxkbcommon-x11", "wayland-libs", "libX11", "libxcb",
+                               "libxkbcommon-x11", "libwayland-client", "libX11", "libxcb",
                                "libXcursor", "libXi", "libXrandr", "fontconfig"],
                     "recommends": ["xdg-desktop-portal"]},
             "archlinux": {"depends": ["glibc>=2.35", "gcc-libs", "libxkbcommon",
