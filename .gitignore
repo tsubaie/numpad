@@ -1,0 +1,10 @@
+/target/
+/release/
+/test-results/
+/test-results-final/
+/NumPad.exe
+*.log
+*.numpad
+.env
+.env.*
+!.env.example
