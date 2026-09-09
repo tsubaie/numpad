@@ -1,4 +1,7 @@
 /target/
+/dist/
+/.tools/
+__pycache__/
 /release/
 /test-results/
 /test-results-final/

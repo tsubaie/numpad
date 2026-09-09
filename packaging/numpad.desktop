@@ -3,6 +3,6 @@ Type=Application
 Name=NumPad
 Comment=Calculation tape with comments and live totals
 Exec=numpad %f
+Icon=numpad
 Terminal=false
 Categories=Office;Calculator;
-MimeType=application/x-numpad;
