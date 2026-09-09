@@ -57,6 +57,7 @@ jobs:
         with:
           shared-key: native-${{ matrix.os }}-${{ matrix.target }}
           cache-workspace-crates: true
+          cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Linux system dependencies
         if: runner.os == 'Linux'
