@@ -15,5 +15,8 @@ curl --proto '=https' --tlsv1.2 -fsSL "$base/$asset" -o "$temporary/$asset"
 curl --proto '=https' --tlsv1.2 -fsSL "$base/checksums.txt" -o "$temporary/checksums.txt"
 expected="$(awk -v name="$asset" '$2 == name {print $1}' "$temporary/checksums.txt")"
 actual="$(sha256sum "$temporary/$asset" | cut -d ' ' -f1)"
-[ -n "$expected" ] && [ "$expected" = "$actual" ] || { echo "nFPM checksum mismatch" >&2; exit 1; }
+if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+    echo "nFPM checksum mismatch" >&2
+    exit 1
+fi
 tar -xzf "$temporary/$asset" -C "$destination" nfpm

@@ -8,7 +8,9 @@ fail() { say "NumPad installer: $*" >&2; exit 1; }
 fetch() { curl --proto '=https' --tlsv1.2 --retry 3 -fsSL "$1" -o "$2"; }
 as_root() {
     if [ "$(id -u)" -eq 0 ]; then "$@"
-    elif command -v sudo >/dev/null 2>&1; then sudo "$@" </dev/tty
+    elif command -v sudo >/dev/null 2>&1; then
+        # Read prompts from the user's terminal, not the piped installer source.
+        { sudo "$@"; } </dev/tty
     else fail "Root or sudo is required. Use NUMPAD_INSTALL=tarball for a per-user Linux install."
     fi
 }
@@ -123,6 +125,8 @@ main() {
                 mv -f "$stage" "$prefix/bin/numpad"
                 install -m644 "$bundle/numpad.png" "$prefix/share/icons/hicolor/256x256/apps/numpad.png"
                 # Escape desktop-entry quoted Exec syntax, including literal percent signs.
+                # Dollar signs and backticks are literal characters here, not shell expansions.
+                # shellcheck disable=SC2016
                 desktop_binary="$(printf '%s' "$prefix/bin/numpad" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\$/\\$/g; s/`/\\`/g; s/%/%%/g')"
                 sed '/^Exec=/d' "$bundle/numpad.desktop" > "$prefix/share/applications/numpad.desktop"
                 printf 'Exec="%s" %%f\n' "$desktop_binary" >> "$prefix/share/applications/numpad.desktop"
