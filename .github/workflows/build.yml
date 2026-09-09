@@ -55,9 +55,8 @@ jobs:
           python-version: '3.13'
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: native-${{ matrix.os }}-${{ matrix.target }}
-          # A cancelled upload reserved the original Intel key; keep other caches intact.
-          key: ${{ matrix.target == 'x86_64-apple-darwin' && 'intel-v2' || '' }}
+          # shared-key overrides key; rotate only Intel's interrupted cache upload.
+          shared-key: native-${{ matrix.os }}-${{ matrix.target }}${{ matrix.target == 'x86_64-apple-darwin' && '-intel-v2' || '' }}
           cache-workspace-crates: true
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
