@@ -35,8 +35,14 @@ def copy_docs(destination):
 
 
 def archive_tree(source, destination):
+    def executable_mode(entry):
+        # Preserve runnable archive payloads even when staging on a Windows filesystem.
+        if entry.isfile() and (entry.name.endswith("/numpad") or entry.name.endswith("/Contents/MacOS/NumPad")):
+            entry.mode = 0o755
+        return entry
+
     with tarfile.open(destination, "w:gz") as archive:
-        archive.add(source, arcname=source.name)
+        archive.add(source, arcname=source.name, filter=executable_mode)
 
 
 def linux_packages(binary, output, work, ver):
