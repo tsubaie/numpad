@@ -155,7 +155,7 @@ Use **Ctrl** on Windows/Linux and **Cmd** on macOS.
 
 ## Contributing
 
-Bug reports, focused improvements, and platform testing are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and what to include in an issue.
+Bug reports, focused improvements, and platform testing are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and what to include in an issue. AI-assisted contributions are welcome: read the [AI contribution guidelines](CONTRIBUTING.md#ai-assisted-contributions) and [coding conventions](CONTRIBUTING.md#coding-conventions) before submitting a change.
 
 The code separates arithmetic, tape evaluation, editing, persistence, and the native interface. Read the [architecture overview](docs/ARCHITECTURE.md) before making larger changes.
 
