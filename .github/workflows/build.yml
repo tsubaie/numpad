@@ -1,30 +1,151 @@
 name: Native builds
 on:
   push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore: ['**.md', 'docs/**']
   pull_request:
+    paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   build:
+    name: ${{ matrix.platform }} / ${{ matrix.arch }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-22.04
+            platform: linux
+            arch: x86_64
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            platform: windows
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+          - os: macos-15
+            platform: macos
+            arch: arm64
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            platform: macos
+            arch: x86_64
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: native-${{ matrix.os }}-${{ matrix.target }}
+          cache-workspace-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Linux system dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libgl1-mesa-dev
-      - run: cargo test --release --locked
-      - run: cargo build --release --locked
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libgl1-mesa-dev shellcheck
+      - name: Validate scripts
+        if: runner.os == 'Linux'
+        run: |
+          shellcheck install.sh scripts/setup-nfpm.sh scripts/verify-linux-packages.sh scripts/package-macos.sh
+          python -m unittest discover -s tests -p 'test_*.py' -v
+      - run: cargo fmt --check
+      - run: cargo clippy --release --locked --target ${{ matrix.target }} --all-targets -- -D warnings
+      - run: cargo test --release --locked --target ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Restore packaging tool
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: .tools/nfpm
+          key: nfpm-2.47.0-linux-x86_64
+      - name: Set up packaging tool
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sh scripts/setup-nfpm.sh
+          echo "$PWD/.tools/nfpm" >> "$GITHUB_PATH"
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          binary="target/$TARGET/release/numpad"
+          if [ "$PLATFORM" = windows ]; then binary="$binary.exe"; fi
+          python scripts/package.py --binary "$binary" --platform "$PLATFORM" --arch "$ARCH" --output dist
+      - name: Smoke-test native binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          binary="target/$TARGET/release/numpad"
+          if [ "$PLATFORM" = windows ]; then binary="$binary.exe"; fi
+          "$binary" --export-demo test-results
+          test -s test-results/sample.pdf
+          test -s test-results/sample.xlsx
+          test -s test-results/sample.numpad
+      - name: Verify Linux packages
+        if: runner.os == 'Linux'
+        run: sh scripts/verify-linux-packages.sh dist
       - uses: actions/upload-artifact@v4
         with:
-          name: NumPad-${{ runner.os }}-${{ runner.arch }}
-          path: |
-            target/release/numpad.exe
-            target/release/numpad
-            docs/
-            README.md
+          name: NumPad-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
 
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: NumPad-*
+          path: dist
+          merge-multiple: true
+      - run: python scripts/checksums.py dist
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --json isDraft --jq .isDraft > /tmp/numpad-draft; then
+            if [ "$(cat /tmp/numpad-draft)" != true ]; then
+              echo "Release already published; refusing to replace public assets." >&2
+              exit 1
+            fi
+          else
+            gh release create "$TAG" --verify-tag --draft --title "NumPad $TAG" --notes-file packaging/RELEASE-NOTES.md
+          fi
+          gh release upload "$TAG" dist/* --clobber
+          gh release edit "$TAG" --draft=false --latest
