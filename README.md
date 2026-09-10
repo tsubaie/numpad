@@ -1,30 +1,52 @@
 <div align="center">
   <img src="docs/images/icon.png" width="100" height="100" alt="NumPad calculator icon">
   <h1>NumPad</h1>
-  <p><strong>Your numbers. Your notes. One clear tape.</strong></p>
-  <p>A native calculator that keeps the working, not just the answer.<br>Write numbers and notes, reuse named values, and organize your work in tabs.</p>
+  <p><strong>A calculator built for a screen, not a pocket.</strong></p>
+  <p>Calculator apps still copy a 1970s gadget: one line of display, every step forgotten at <code>=</code>.<br>NumPad is a running tape instead. Amounts down a column, a note beside each one,<br>change any line and every total below it updates. Free, native, and offline.</p>
   <p>
     <a href="https://github.com/tsubaie/numpad/actions/workflows/build.yml"><img src="https://github.com/tsubaie/numpad/actions/workflows/build.yml/badge.svg?branch=main" alt="Native builds"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-a6e3a1" alt="MIT license"></a>
     <img src="https://img.shields.io/badge/built_with-Rust_%2B_Iced-cba6f7" alt="Built with Rust and Iced">
   </p>
   <p><a href="#install">Install</a> · <a href="#how-the-tape-works">Quick start</a> · <a href="#screenshots">Screenshots</a> · <a href="#development-and-testing">Development</a></p>
-  <p><sub>Linux, macOS & Windows · Rust + Iced · MIT licensed</sub></p>
+  <p><sub>Linux, macOS & Windows · Rust + Iced · MIT licensed · No account, no server, no telemetry</sub></p>
 </div>
 
 ![NumPad dark theme: three document tabs, an editable project estimate, named rates, VAT, and calculator memory](docs/images/numpad-dark.png)
 
 ## Why NumPad
 
-NumPad is for the working behind a number: a project estimate, a shopping list, a quick budget, or a calculation you want to revisit. Write numbers and notes on the same tape, then change any earlier value to update the totals below it.
+Every calculator app is a pocket calculator drawn on a screen. One line of display, because that was all a 1970s LCD could show, and every step gone the moment you press `=`. The hardware limit disappeared decades ago. The design never caught up.
+
+NumPad starts from what a screen can actually do. It is a running tape: each line is one step applied to the total, with room for a note beside it, and the whole calculation stays in view. Go back, change any line, and everything below it recalculates.
+
+That makes it the tool for the gap you hit every week: a quote, a trip, a month of bills. Too big for a calculator that forgets line one by line three. Too small to justify a spreadsheet.
+
+|  | Calculator | Spreadsheet | NumPad |
+| :--- | :--- | :--- | :--- |
+| See every step | Gone after `=` | Scattered across cells | One tape, top to bottom |
+| Fix an earlier number | Start over | Edit the cell | Edit the line; totals follow |
+| A note beside each amount | No | Another column | Same line |
+| Setup before you start | None | Layout, formulas, formatting | None |
+| Reuse a value by name | No | Cell references | `rate = 120`, then `× rate` |
+
+### What people use it for
+
+- **Quotes and estimates.** Hours times rate, plus expenses, plus VAT. Change the hours and the client total follows.
+- **Budgets.** Income at the top, every expense with its name, what is left at the bottom.
+- **Checking someone else's total.** Type the invoice in as it reads and see exactly where it diverges.
+- **Quick what-ifs.** Open a second tab, change one number, compare the two.
+
+### What you get
 
 - **A tape you can edit.** Annotate amounts, correct earlier inputs, and watch dependent subtotals update.
-- **Room for more than one task.** Connected document tabs keep separate tapes, memory, undo history, and files. Restore your open work after restarting.
 - **Named values that stay connected.** Define a rate or quantity once and reuse it throughout the tape.
-- **Everyday calculation tools.** Percentages, memory, scientific functions, and shared add/remove tax controls. VAT starts at 15% and is configurable.
-- **At home on your desktop.** Follow the system theme—including Omarchy's current palette—or choose Light or Dark. Adjust zoom, ruled paper, and the tape font in one tabbed Settings window.
-- **Your work stays local.** Automatic session recovery, portable `.numpad` documents, and exports to text, PDF, and Excel.
-- **A native desktop app.** Written in Rust with Iced. No browser runtime, account, or server required.
+- **One tab per problem.** Each tab keeps its own tape, memory, undo history, and file. Open work is restored after a restart.
+- **Tax done properly.** Add VAT, or strip included VAT by dividing rather than subtracting. The rate is yours to set; 15% is only the default.
+- **Everyday tools within reach.** Percentages, memory, and scientific functions sit beside the tape.
+- **Looks like it belongs.** Follow the system theme, including Omarchy's live palette, or pick Light or Dark. Zoom, ruled paper, and the tape font are yours to adjust.
+- **Your work stays yours.** Automatic session recovery, portable `.numpad` documents, and exports to text, PDF, and Excel. Nothing leaves your machine.
+- **Native, not a web page in a frame.** Written in Rust with Iced. No browser runtime, account, or server.
 
 ## Screenshots
 
