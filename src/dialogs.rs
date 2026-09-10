@@ -14,12 +14,14 @@ pub enum AboutLink {
     Repository,
     Author,
     Issues,
+    Releases,
 }
 
 pub(super) fn open_link(link: AboutLink) -> Task<Message> {
     let url = match link {
         AboutLink::Repository => "https://github.com/tsubaie/numpad",
-        AboutLink::Author => "https://github.com/tsubaie",
+        AboutLink::Author => "https://www.ta.sa",
+        AboutLink::Releases => "https://github.com/tsubaie/numpad/releases/latest",
         AboutLink::Issues => "https://github.com/tsubaie/numpad/issues",
     };
     Task::perform(
@@ -114,6 +116,63 @@ impl App {
         .into()
     }
 
+    fn updates_view(&self) -> Element<'_, Message> {
+        use updates::State;
+        let p = self.colors();
+        let status = match &self.update_state {
+            State::Idle => "Check GitHub for the latest stable release. Nothing is downloaded until you request it.".into(),
+            State::Checking => "Checking for updates…".into(),
+            State::Current(version) => format!("You're up to date. Latest stable release: {version}."),
+            State::Available(version) => format!("NumPad {version} is available."),
+            State::Installing(version) => format!("Installing NumPad {version}. Follow the installer window; it may ask for administrator approval."),
+            State::Installed(version) => format!("NumPad {version} installed. Close and reopen NumPad to use the update."),
+            State::Failed(error) => error.clone(),
+        };
+        let mut controls = row![
+            button(
+                text(if matches!(self.update_state, State::Checking) {
+                    "Checking…"
+                } else {
+                    "Check for updates"
+                })
+                .size(13)
+            )
+            .padding([8, 12])
+            .style(move |_, status| {
+                let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                let disabled = status == button::Status::Disabled;
+                button::Style {
+                    background: Some(if hovered { p.selected } else { p.card }.into()),
+                    text_color: if disabled { p.muted } else { p.text },
+                    border: Border {
+                        color: if hovered { p.accent } else { p.rule },
+                        width: 1.0,
+                        radius: 6.0.into(),
+                    },
+                    ..Default::default()
+                }
+            })
+            .on_press_maybe(
+                (!matches!(self.update_state, State::Checking | State::Installing(_)))
+                    .then_some(Message::CheckUpdates)
+            )
+        ]
+        .spacing(10)
+        .align_y(alignment::Vertical::Center);
+        if matches!(self.update_state, State::Available(_)) {
+            controls = controls.push(self.small("Install update", Message::InstallUpdate));
+        }
+        controls = controls.push(
+            button(text("Release downloads ↗").size(12).color(p.muted))
+                .padding([8, 4])
+                .style(button::text)
+                .on_press(Message::OpenLink(AboutLink::Releases)),
+        );
+        self.card(container(column![text("Updates").size(16).color(p.accent), text(status).size(13), controls,
+            text(if cfg!(target_os="windows") {"Installation verifies the release checksum, saves your session, then closes and restarts NumPad. The installation folder must be writable."} else {"Install update opens the checksum-verifying installer in a terminal. Your documents stay in place. Restart NumPad after installation."}).size(12).color(p.muted)
+        ].spacing(10)).padding(14),p.background).into()
+    }
+
     fn settings_content<'a>(&'a self, draft: &'a SettingsDraft) -> Element<'a, Message> {
         let p = self.colors();
         match draft.tab {
@@ -125,8 +184,11 @@ impl App {
                 text("Your numbers. Your notes. One clear tape.").size(17).color(p.accent),
                 text("A native calculator with editable calculation tapes. Keep numbers and notes together, revisit earlier values, and organize your work in separate tabs.").size(14),
                 text("Calculations and session recovery stay on your device. Save portable .numpad documents or export your work to text, PDF, and Excel.").size(14),
-                text("Created by @tsubaie").size(16),
-                self.small("GitHub profile ↗", Message::OpenLink(AboutLink::Author)),
+                self.updates_view(),
+                button(text("Created by tsubaie ↗").size(16).color(p.accent))
+                    .padding([4, 0])
+                    .style(button::text)
+                    .on_press(Message::OpenLink(AboutLink::Author)),
                 row![self.small("View project on GitHub ↗", Message::OpenLink(AboutLink::Repository)), self.small("Report an issue ↗", Message::OpenLink(AboutLink::Issues))].spacing(8),
                 text("Open source · MIT license\nBuilt with Rust and Iced\n© 2026 NumPad contributors").size(13).color(p.muted),
                 text(self.toast.as_ref().map(|(notice, _)| notice.as_str()).filter(|notice| notice.starts_with("Could not open")).unwrap_or("")).size(13).color(p.negative),
@@ -377,7 +439,7 @@ pub(crate) mod tests {
         let prefs = Preferences::default();
         App {
             editor: Editor::new("1.5".into(), &prefs.format),
-            content: text_editor::Content::with_text("1.5"),
+            content: TapeContent::with_text("1.5"),
             prefs,
             memory: Number::default(),
             file: None,
@@ -386,6 +448,10 @@ pub(crate) mod tests {
             modal: None,
             dirty: false,
             autosaved: true,
+            workspace_revision: 0,
+            autosave_pending: false,
+            exit_request: None,
+            theme_watcher: system_theme::ThemeWatcher::new(),
             toast: None,
             copied: None,
             width: 1180.0,
@@ -401,9 +467,27 @@ pub(crate) mod tests {
             revision: 0,
             pending_close: None,
             modifiers: keyboard::Modifiers::default(),
+            update_state: updates::State::default(),
         }
     }
 
+    #[test]
+    fn checking_updates_never_starts_installation_or_changes_documents() {
+        let mut app = app();
+        let before = app.editor.text.clone();
+        let _ = app.update(Message::CheckUpdates);
+        assert!(matches!(app.update_state, updates::State::Checking));
+        let _ = app.update(Message::UpdateChecked(Ok(updates::Version([99, 0, 0]))));
+        assert!(matches!(app.update_state, updates::State::Available(_)));
+        assert_eq!(app.editor.text, before);
+        assert!(!app.dirty);
+        let _ = app.update(Message::UpdateChecked(Ok(updates::Version([0, 0, 1]))));
+        assert!(matches!(app.update_state, updates::State::Current(_)));
+        let _ = app.update(Message::InstallUpdate);
+        assert!(matches!(app.update_state, updates::State::Current(_)));
+        let _ = app.update(Message::UpdateChecked(Err("Offline".into())));
+        assert!(matches!(app.update_state, updates::State::Failed(_)));
+    }
     #[test]
     fn settings_cancel_discards_edits_across_tabs() {
         let mut app = app();

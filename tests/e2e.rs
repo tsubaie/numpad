@@ -40,7 +40,27 @@ impl App {
             .append(true)
             .open(dir.join("app.log"))
             .unwrap();
+        // Exercise the real About controls without making network requests or
+        // touching installed applications. Only this child receives the shim.
+        let commands = dir.join("commands");
+        fs::create_dir_all(&commands).unwrap();
+        fs::write(commands.join("curl"), "#!/bin/sh\nprintf checked > \"$NUMPAD_E2E_DIR/update-requested\"\n[ ! -f \"$NUMPAD_E2E_DIR/update-offline\" ] || exit 22\ncat \"$NUMPAD_E2E_DIR/update-response.json\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(commands.join("curl"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(
+            dir.join("update-response.json"),
+            r#"{"tag_name":"v99.0.0","draft":false,"prerelease":false}"#,
+        )
+        .unwrap();
+        let mut paths = vec![commands];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
         let child = Command::new(env!("CARGO_BIN_EXE_numpad"))
+            .env("PATH", std::env::join_paths(paths).unwrap())
             .env("NUMPAD_DATA_DIR", dir.join("data"))
             .env("NUMPAD_E2E_DIR", &dir)
             .env("XDG_CONFIG_HOME", dir.join("config"))
@@ -285,6 +305,47 @@ fn main() {
             .iter()
             .any(|t| t["name"].as_str().unwrap_or("").contains("@tsubaie"))
     });
+    assert!(
+        !dir.join("update-requested").exists(),
+        "No automatic update request"
+    );
+    app.click("Check for updates");
+    app.wait("new release available", |s| {
+        s["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "Install update")
+    });
+    app.capture_documentation("about-updates");
+    fs::write(
+        dir.join("update-response.json"),
+        format!(
+            r#"{{"tag_name":"v{}","draft":false,"prerelease":false}}"#,
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
+    .unwrap();
+    app.click("Check for updates");
+    app.wait("already current", |s| {
+        s["targets"].as_array().unwrap().iter().any(|t| {
+            t["name"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("You're up to date.")
+        })
+    });
+    fs::write(dir.join("update-offline"), "").unwrap();
+    app.click("Check for updates");
+    app.wait("offline update feedback", |s| {
+        s["targets"].as_array().unwrap().iter().any(|t| {
+            t["name"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("Could not check GitHub.")
+        })
+    });
+    println!("PASS on-demand update checks, version comparison, and offline feedback");
     app.click("Cancel");
     app.wait("cancel", |s| s["modal"] == false);
     println!("PASS menu dismissal and settings navigation");

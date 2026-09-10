@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::engine::{self, Format, Kind, Tape};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -18,9 +20,13 @@ pub struct Editor {
     pub anchor: Option<Pos>,
     pub tape: Tape,
     format: Format,
-    undo: Vec<Snapshot>,
-    redo: Vec<Snapshot>,
+    undo: VecDeque<Snapshot>,
+    redo: VecDeque<Snapshot>,
+    history_bytes: usize,
+    pending: Option<Snapshot>,
+    batching: bool,
     pub notice: String,
+    pub text_revision: u64,
 }
 impl Editor {
     pub fn new(text: String, f: &Format) -> Self {
@@ -31,9 +37,13 @@ impl Editor {
             anchor: None,
             tape,
             format: f.clone(),
-            undo: vec![],
-            redo: vec![],
+            undo: VecDeque::new(),
+            redo: VecDeque::new(),
+            history_bytes: 0,
+            pending: None,
+            batching: false,
             notice: String::new(),
+            text_revision: 0,
         }
     }
     pub fn can_undo(&self) -> bool {
@@ -51,14 +61,48 @@ impl Editor {
         }
     }
     fn record(&mut self) {
-        self.undo.push(self.snapshot());
-        if self.undo.len() > 300 {
-            self.undo.remove(0);
+        if self.pending.is_none() {
+            self.pending = Some(self.snapshot());
         }
-        self.redo.clear();
         self.notice.clear();
     }
+    fn push_history(&mut self, snapshot: Snapshot, undo: bool) {
+        self.history_bytes += snapshot.text.capacity();
+        if undo {
+            self.undo.push_back(snapshot);
+        } else {
+            self.redo.push_back(snapshot);
+        }
+        // A shared byte budget prevents large documents and multiple tabs from
+        // retaining hundreds of full copies. Small tapes still get 300 steps.
+        while self.history_bytes > 8 * 1024 * 1024 || self.undo.len() + self.redo.len() > 300 {
+            let removed = if !self.undo.is_empty() {
+                self.undo.pop_front()
+            } else {
+                self.redo.pop_front()
+            };
+            if let Some(snapshot) = removed {
+                self.history_bytes -= snapshot.text.capacity();
+            }
+        }
+    }
+    fn finish_record(&mut self) {
+        if self.batching {
+            return;
+        }
+        if let Some(before) = self.pending.take()
+            && before.text != self.text
+        {
+            self.text_revision += 1;
+            self.history_bytes -= self.redo.iter().map(|s| s.text.capacity()).sum::<usize>();
+            self.redo.clear();
+            self.push_history(before, true);
+        }
+    }
     fn restore(&mut self, s: Snapshot, f: &Format) {
+        if self.text != s.text || s.format != *f {
+            self.text_revision += 1;
+        }
         self.text = if s.format == *f {
             s.text
         } else {
@@ -70,14 +114,16 @@ impl Editor {
         self.format = f.clone();
     }
     pub fn undo(&mut self, f: &Format) {
-        if let Some(s) = self.undo.pop() {
-            self.redo.push(self.snapshot());
+        if let Some(s) = self.undo.pop_back() {
+            self.history_bytes -= s.text.capacity();
+            self.push_history(self.snapshot(), false);
             self.restore(s, f);
         }
     }
     pub fn redo(&mut self, f: &Format) {
-        if let Some(s) = self.redo.pop() {
-            self.undo.push(self.snapshot());
+        if let Some(s) = self.redo.pop_back() {
+            self.history_bytes -= s.text.capacity();
+            self.push_history(self.snapshot(), true);
             self.restore(s, f);
         }
     }
@@ -122,6 +168,10 @@ impl Editor {
         let a = self.anchor.map(|a| self.index(a)).unwrap_or(p);
         (p.min(a), p.max(a))
     }
+    fn has_selection(&self) -> bool {
+        let (start, end) = self.range();
+        start != end
+    }
     pub fn selection(&self) -> Option<String> {
         let (s, e) = self.range();
         if s < e {
@@ -132,27 +182,24 @@ impl Editor {
     }
     fn replace(&mut self, value: &str) -> bool {
         let (s, e) = self.range();
-        let mut next = String::with_capacity(self.text.len() + value.len());
-        next.push_str(&self.text[..s]);
-        next.push_str(value);
-        next.push_str(&self.text[e..]);
-        let old = self.text.split('\n').count();
-        let new = next.split('\n').count();
-        if new > 500 && new > old {
+        let new_lines = value.bytes().filter(|b| *b == b'\n').count();
+        let removed_lines = self.text[s..e].bytes().filter(|b| *b == b'\n').count();
+        let old_lines = self.tape.lines.len();
+        if new_lines > removed_lines && old_lines + new_lines - removed_lines > 500 {
             self.notice = "500-line limit reached. Delete a line before adding more.".into();
             return false;
         }
-        if next.len() > 1_000_000 {
+        if self.text.len() - (e - s) + value.len() > 1_000_000 {
             self.notice = "Document exceeds the 1 MB text limit.".into();
             return false;
         }
-        self.text = next;
+        self.text.replace_range(s..e, value);
         self.caret = self.position(s + value.len());
         self.anchor = None;
         true
     }
     fn protected(&self) -> bool {
-        if self.selection().is_some() {
+        if self.has_selection() {
             return false;
         }
         self.tape.lines.get(self.caret.line).is_some_and(|l| {
@@ -164,7 +211,7 @@ impl Editor {
     }
     pub fn key(&mut self, c: char, f: &Format) {
         if c == '='
-            && self.selection().is_none()
+            && !self.has_selection()
             && self
                 .tape
                 .lines
@@ -174,7 +221,7 @@ impl Editor {
             self.enter(f);
             return;
         }
-        if matches!(c, '+' | '-' | '*' | '/' | '^' | '×' | '÷') && self.selection().is_none() {
+        if matches!(c, '+' | '-' | '*' | '/' | '^' | '×' | '÷') && !self.has_selection() {
             let op = match c {
                 '×' => '*',
                 '÷' => '/',
@@ -238,7 +285,7 @@ impl Editor {
     }
     pub fn enter(&mut self, f: &Format) {
         self.record();
-        if self.selection().is_some() {
+        if self.has_selection() {
             self.replace("\n");
             self.recalculate(f, false);
             return;
@@ -269,7 +316,7 @@ impl Editor {
             return;
         }
         self.record();
-        if self.selection().is_some() {
+        if self.has_selection() {
             self.replace("");
         } else {
             let i = self.index(self.caret);
@@ -288,13 +335,15 @@ impl Editor {
     pub fn recalculate(&mut self, f: &Format, format_all: bool) {
         self.format = f.clone();
         self.tape = engine::calculate(&self.text, f);
-        let mut rows: Vec<String> = self.text.split('\n').map(str::to_owned).collect();
-        let mut changed = false;
-        for (i, l) in self.tape.lines.iter().enumerate() {
-            if l.kind == Kind::Total || (format_all && l.kind == Kind::Value) {
-                let next = engine::render(l, f);
-                if rows[i] != next {
-                    let delta = next.len() as isize - rows[i].len() as isize;
+        let mut replacements = Vec::new();
+        let mut offset = 0;
+        let mut operands_changed = false;
+        for (i, line) in self.tape.lines.iter_mut().enumerate() {
+            let old_len = line.raw.len();
+            if line.kind == Kind::Total || (format_all && line.kind == Kind::Value) {
+                let next = engine::render(line, f);
+                if line.raw != next {
+                    let delta = next.len() as isize - old_len as isize;
                     if self.caret.line == i {
                         self.caret.column = self
                             .caret
@@ -307,15 +356,22 @@ impl Editor {
                     {
                         a.column = a.column.saturating_add_signed(delta).min(next.len());
                     }
-                    rows[i] = next;
-                    changed = true;
+                    operands_changed |= line.kind == Kind::Value;
+                    line.raw.clone_from(&next);
+                    replacements.push((offset..offset + old_len, next));
                 }
             }
+            offset += old_len + 1;
         }
-        if changed {
-            self.text = rows.join("\n");
+        // Apply from the end so offsets stay valid. Generated totals do not
+        // change arithmetic; formatted operands still need re-evaluation.
+        for (range, next) in replacements.into_iter().rev() {
+            self.text.replace_range(range, &next);
+        }
+        if operands_changed {
             self.tape = engine::calculate(&self.text, f);
         }
+        self.finish_record();
     }
     pub fn format_changed(&mut self, old: &Format, new: &Format) {
         self.text = transcode(&self.text, old, new);
@@ -325,8 +381,8 @@ impl Editor {
     pub fn custom(&mut self, formula: &str, close: bool, f: &Format) {
         let formula = formula.replace("\\n", "\n");
         // Each character follows calculator input rules, just like the keypad.
-        let before = self.snapshot();
-        let history = self.undo.len();
+        self.record();
+        self.batching = true;
         for c in formula.chars() {
             if c == '\n' {
                 self.enter(f);
@@ -337,8 +393,8 @@ impl Editor {
         if close {
             self.enter(f);
         }
-        self.undo.truncate(history);
-        self.undo.push(before);
+        self.batching = false;
+        self.finish_record();
     }
 }
 
@@ -375,6 +431,68 @@ mod tests {
     fn type_text(e: &mut Editor, s: &str) {
         for c in s.chars() {
             e.key(c, &Format::default());
+        }
+    }
+    #[test]
+    fn rejected_edits_keep_redo_and_do_not_consume_history() {
+        let f = Format::default();
+        let mut e = Editor::new("1".into(), &f);
+        e.caret.column = 1;
+        e.key('2', &f);
+        e.undo(&f);
+        let bytes = e.history_bytes;
+        e.caret = Pos::default();
+        e.delete(true, &f);
+        assert!(e.can_redo());
+        assert_eq!(e.history_bytes, bytes);
+        e.paste(&"x".repeat(1_000_001), &f);
+        assert!(e.can_redo());
+        assert_eq!(e.history_bytes, bytes);
+        e.redo(&f);
+        assert_eq!(e.text, "12");
+    }
+    #[test]
+    fn undo_memory_is_bounded_and_custom_actions_are_one_step() {
+        let f = Format::default();
+        let mut e = Editor::new(format!("note {}", "x".repeat(900_000)), &f);
+        e.caret.column = e.text.len();
+        for _ in 0..30 {
+            e.key('x', &f);
+        }
+        assert!(e.history_bytes <= 8 * 1024 * 1024);
+        assert!(e.undo.len() < 10);
+        e.undo(&f);
+        e.redo(&f);
+        assert!(e.history_bytes <= 8 * 1024 * 1024);
+        let mut e = Editor::new("1".into(), &f);
+        e.caret.column = 1;
+        for _ in 0..310 {
+            e.key('x', &f);
+        }
+        let before = e.text.clone();
+        e.custom("abc", false, &f);
+        e.undo(&f);
+        assert_eq!(e.text, before);
+        assert!(e.undo.len() + e.redo.len() <= 300);
+    }
+    #[test]
+    fn formatted_totals_match_a_fresh_evaluation() {
+        let f = Format::default();
+        for source in [
+            "100\n+15%\n---\n+0 = net tax\n*2\n---\n+0",
+            "10\n/0\n---\n+0",
+            "100\n-200\n---\n-0",
+        ] {
+            let mut e = Editor::new(source.into(), &f);
+            e.recalculate(&f, false);
+            let fresh = engine::calculate(&e.text, &f);
+            assert_eq!(e.tape.grand, fresh.grand);
+            assert_eq!(e.tape.variables, fresh.variables);
+            for (line, fresh) in e.tape.lines.iter().zip(fresh.lines) {
+                assert_eq!(line.raw, fresh.raw);
+                assert_eq!(line.result, fresh.result);
+                assert_eq!(line.error, fresh.error);
+            }
         }
     }
     #[test]

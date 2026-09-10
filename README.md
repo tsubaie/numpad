@@ -45,7 +45,7 @@ That makes it the tool for the gap you hit every week: a quote, a trip, a month 
 - **Tax done properly.** Add VAT, or strip included VAT by dividing rather than subtracting. The rate is yours to set; 15% is only the default.
 - **Everyday tools within reach.** Percentages, memory, and scientific functions sit beside the tape.
 - **Looks like it belongs.** Follow the system theme, including Omarchy's live palette, or pick Light or Dark. Zoom, ruled paper, and the tape font are yours to adjust.
-- **Your work stays yours.** Automatic session recovery, portable `.numpad` documents, and exports to text, PDF, and Excel. Nothing leaves your machine.
+- **Your work stays yours.** Automatic session recovery, portable `.numpad` documents, and exports to text, PDF, and Excel. Your calculations stay on your machine.
 - **Native, not a web page in a frame.** Written in Rust with Iced. No browser runtime, account, or server.
 
 ## Screenshots
@@ -144,7 +144,7 @@ Prefer a per-user Linux install or a specific version?
 
 ~~~sh
 curl -fsSL https://raw.githubusercontent.com/tsubaie/numpad/main/install.sh | NUMPAD_INSTALL=tarball sh
-curl -fsSL https://raw.githubusercontent.com/tsubaie/numpad/main/install.sh | NUMPAD_VERSION=1.3.1 sh
+curl -fsSL https://raw.githubusercontent.com/tsubaie/numpad/main/install.sh | NUMPAD_VERSION=1.4.0 sh
 ~~~
 
 ### Download a package
@@ -164,6 +164,14 @@ Get the files from [Releases](https://github.com/tsubaie/numpad/releases/latest)
 **Requirements:** Linux downloads require glibc 2.35+ (Ubuntu 22.04 / Debian 12 or newer) and the desktop libraries declared by the packages. Wayland file dialogs need a desktop portal and the appropriate backend. Alpine/musl and Linux ARM are not included. macOS builds target 11.0+.
 
 **Signing:** macOS apps are ad-hoc signed, not Apple-notarized. Windows binaries and Linux packages are not publisher-signed. Your OS may ask you to approve opening the app. The installer does not disable security checks. Release checksums detect corrupted downloads; they are not independent proof of publisher identity.
+
+### Update from NumPad
+
+Open **Menu → Settings → About → Check for updates**. NumPad checks GitHub for the latest stable version only when you click the button. If a newer version is available, choose **Install update**; **Release downloads** opens the release notes and packages.
+
+- **Linux and macOS:** the existing checksum-verifying installer opens in a terminal. Package installs may ask for your sudo password there. A per-user Linux installation stays per-user; otherwise the installer selects the system package manager. macOS installs to `~/Applications/NumPad.app`. Close and reopen the installed app when it finishes. Builds run directly from a source checkout use the normal installer destinations.
+- **Windows:** a visible helper downloads the ZIP and verifies SHA256SUMS, stages the executable, and waits for NumPad to save its session and close. It preserves the old executable as a backup, installs the update, and restarts NumPad. The installation folder must be writable. A failed session save prevents replacement.
+- Version checks require `curl` (`curl.exe` on Windows); installers also use the platform tools described above. Offline checks show an error and leave your work untouched. There are no scheduled checks or automatic downloads, and calculation contents are never sent to GitHub.
 
 ### Build from source
 
@@ -185,7 +193,7 @@ cd numpad
 cargo run --release --locked
 ~~~
 
-The executable is **target/release/numpad.exe** on Windows, or **target/release/numpad** on Linux/macOS. See [builds and releases](docs/RELEASING.md) for local packaging, cache behavior, and publishing a version.
+The executable is **target/release/numpad.exe** on Windows, or **target/release/numpad** on Linux/macOS. See [performance measurements](docs/PERFORMANCE.md) and [builds and releases](docs/RELEASING.md) for local packaging, cache behavior, and publishing a version.
 
 ## Builds and releases
 
@@ -205,6 +213,7 @@ Your session is automatically saved in the operating system's local application-
 A few details worth knowing:
 
 - Display rounding is separate from internal decimal arithmetic.
+- Undo and redo share an 8 MiB history budget per tab, with up to 300 steps. Large tapes may retain fewer steps; rejected edits do not consume history.
 - Excel exports contain values, not executable formulas. Numbers exceeding Excel's 15-digit precision are preserved as text.
 - Unicode PDF export requires an available supported font, such as Consolas, DejaVu Sans Mono, or Courier New. Complex-script shaping is not certified.
 - Current saves use document format version 2. Version 1 documents still open, but recalculate using the current top-to-bottom tape rules.
@@ -253,7 +262,7 @@ xvfb-run -a -s '-screen 0 1280x1024x24' cargo test --locked --features e2e --tes
 ```
 
 Coverage includes connected-tab geometry and seam colors, editing, undo/redo,
-clipboard round-trips, menu click-away, Settings/About, theme Save/Cancel,
+clipboard round-trips, menu click-away, Settings/About and mocked update checks, theme Save/Cancel,
 compact layout, keyboard/wheel zoom, long-tape scrolling, independent tabs,
 and recovery after forced termination. Each run has isolated app/XDG data;
 logs, state, and screenshots remain in `test-results/e2e/`.

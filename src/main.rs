@@ -6,11 +6,14 @@ mod e2e;
 mod editor;
 mod engine;
 mod math;
+mod pdf_export;
 mod storage;
 mod system_theme;
 mod tabs;
+mod tape_content;
 #[cfg(test)]
 mod tests;
+mod updates;
 
 use appearance::Colors;
 use editor::{Editor, Pos};
@@ -27,10 +30,10 @@ use iced::{
 use math::Number;
 use std::{
     path::PathBuf,
-    sync::Arc,
     time::{Duration, Instant},
 };
 use storage::{Document, Preferences, TaxSettings};
+use tape_content::TapeContent;
 use text_editor::{Action, Binding, Edit};
 
 const INTRO: &str = "Welcome to NumPad\nTape operations run from top to bottom.\nType 10+2*3, then Enter: (10+2)*3 gives 36.\n\n +          10.00\n +           2.00\n *           3.00\n -----------------\n +          36.00\n\nAssignments use standard precedence: multiplication first.\nx = 10+2*3\n\nLeave a blank line for a separate calculation.\nPress Enter to insert a subtotal.\nUse + in the tab bar for a separate tape.\nOpen ? for worked examples and shortcuts.\n";
@@ -80,6 +83,10 @@ enum Message {
     SettingsTab(dialogs::SettingsTab),
     GuideTab(dialogs::GuideTab),
     ModifiersChanged(keyboard::Modifiers),
+    CheckUpdates,
+    UpdateChecked(Result<updates::Version, String>),
+    InstallUpdate,
+    UpdateInstalled(updates::Version, Result<updates::InstallOutcome, String>),
     OpenLink(dialogs::AboutLink),
     LinkOpened(Result<(), String>),
     NewTab,
@@ -111,6 +118,7 @@ enum Message {
     Save(FileKind, bool),
     Opened(Box<Result<Option<(PathBuf, Document)>, String>>),
     Saved(u64, u64, Result<Option<(PathBuf, FileKind)>, String>),
+    WorkspaceSaved(u64, bool, Result<(), String>),
     Tick,
     Resize(Size),
     Quit(window::Id),
@@ -123,7 +131,7 @@ enum Modal {
 }
 struct App {
     editor: Editor,
-    content: text_editor::Content,
+    content: TapeContent,
     prefs: Preferences,
     memory: Number,
     file: Option<PathBuf>,
@@ -132,6 +140,10 @@ struct App {
     modal: Option<Modal>,
     dirty: bool,
     autosaved: bool,
+    workspace_revision: u64,
+    autosave_pending: bool,
+    exit_request: Option<tabs::ExitRequest>,
+    theme_watcher: system_theme::ThemeWatcher,
     toast: Option<(String, Instant)>,
     copied: Option<(CopyKind, Instant)>,
     width: f32,
@@ -147,6 +159,7 @@ struct App {
     revision: u64,
     pending_close: Option<u64>,
     modifiers: keyboard::Modifiers,
+    update_state: updates::State,
 }
 
 fn main() -> iced::Result {
@@ -194,7 +207,7 @@ impl App {
         let mut editor = Editor::new(doc.text, &doc.preferences.format);
         editor.recalculate(&doc.preferences.format, true);
         let mut app = Self {
-            content: text_editor::Content::with_text(&editor.text),
+            content: TapeContent::with_text(&editor.text),
             editor,
             prefs: doc.preferences,
             memory: storage::memory_value(&doc.memory),
@@ -204,6 +217,10 @@ impl App {
             modal: None,
             dirty: false,
             autosaved: true,
+            workspace_revision: 0,
+            autosave_pending: false,
+            exit_request: None,
+            theme_watcher: system_theme::ThemeWatcher::new(),
             toast: failure.map(|e| (e, Instant::now())),
             copied: None,
             width: 1180.0,
@@ -219,6 +236,7 @@ impl App {
             revision: 0,
             pending_close: None,
             modifiers: keyboard::Modifiers::default(),
+            update_state: updates::State::default(),
         };
         if let Err(error) = app.restore_workspace() {
             app.notify(format!("Could not restore tabs: {error}"));
@@ -303,22 +321,24 @@ impl App {
             }),
         ])
     }
+    fn edit_tape(&mut self, edit: impl FnOnce(&mut Editor, &engine::Format)) {
+        let before = self.editor.text_revision;
+        edit(&mut self.editor, &self.prefs.format);
+        if self.editor.text_revision != before {
+            self.mark_dirty();
+        }
+    }
     fn mark_dirty(&mut self) {
         self.modified = true;
         self.revision += 1;
-        self.dirty = true;
+        self.dirty_workspace();
         self.autosaved = false;
     }
     fn notify(&mut self, s: impl Into<String>) {
         self.toast = Some((s.into(), Instant::now()));
     }
     fn sync(&mut self) {
-        if self.content.text() != self.editor.text {
-            self.content.perform(Action::SelectAll);
-            self.content.perform(Action::Edit(Edit::Paste(Arc::new(
-                self.editor.text.clone(),
-            ))));
-        }
+        self.content.sync(&self.editor.text);
         self.content.move_to(text_editor::Cursor {
             position: text_editor::Position {
                 line: self.editor.caret.line,
@@ -382,6 +402,14 @@ impl App {
             .unwrap_or_default()
     }
     fn update(&mut self, message: Message) -> Task<Message> {
+        if self.exit_request.is_some()
+            && !matches!(
+                &message,
+                Message::WorkspaceSaved(..) | Message::Quit(_) | Message::Tick
+            )
+        {
+            return Task::none();
+        }
         match message {
             #[cfg(feature = "e2e")]
             Message::Probe => return e2e::probe(),
@@ -397,6 +425,64 @@ impl App {
             }
             Message::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers;
+                return Task::none();
+            }
+            Message::CheckUpdates => {
+                if matches!(
+                    self.update_state,
+                    updates::State::Checking | updates::State::Installing(_)
+                ) {
+                    return Task::none();
+                }
+                self.update_state = updates::State::Checking;
+                return Task::perform(
+                    async {
+                        tokio::task::spawn_blocking(updates::check)
+                            .await
+                            .map_err(|e| format!("Update check failed: {e}"))?
+                    },
+                    Message::UpdateChecked,
+                );
+            }
+            Message::UpdateChecked(result) => {
+                self.update_state = match result {
+                    Ok(version)
+                        if updates::Version::parse(env!("CARGO_PKG_VERSION"))
+                            .is_ok_and(|current| version > current) =>
+                    {
+                        updates::State::Available(version)
+                    }
+                    Ok(version) => updates::State::Current(version),
+                    Err(error) => updates::State::Failed(error),
+                };
+                return Task::none();
+            }
+            Message::InstallUpdate => {
+                let updates::State::Available(version) = self.update_state else {
+                    return Task::none();
+                };
+                self.update_state = updates::State::Installing(version);
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || updates::install(version))
+                            .await
+                            .map_err(|e| format!("Update installer failed: {e}"))?
+                    },
+                    move |result| Message::UpdateInstalled(version, result),
+                );
+            }
+            Message::UpdateInstalled(version, result) => {
+                match result {
+                    Ok(updates::InstallOutcome::Installed) => {
+                        self.update_state = updates::State::Installed(version)
+                    }
+                    #[cfg(target_os = "windows")]
+                    Ok(updates::InstallOutcome::RestartToInstall(directory)) => {
+                        self.exit_request = Some(tabs::ExitRequest::Restart(directory));
+                        return self.start_workspace_save();
+                    }
+                    Err(error) => self.update_state = updates::State::Failed(error),
+                }
                 return Task::none();
             }
             Message::OpenLink(link) => {
@@ -454,17 +540,15 @@ impl App {
                 });
                 match action {
                     Action::Edit(edit) => {
-                        match edit {
-                            Edit::Insert(c) => self.editor.key(c, &self.prefs.format),
-                            Edit::Enter => self.editor.enter(&self.prefs.format),
-                            Edit::Paste(s) => self.editor.paste(&s, &self.prefs.format),
-                            Edit::Backspace => self.editor.delete(true, &self.prefs.format),
-                            Edit::Delete => self.editor.delete(false, &self.prefs.format),
-                            Edit::Indent => self.editor.key(' ', &self.prefs.format),
+                        self.edit_tape(|editor, format| match edit {
+                            Edit::Insert(c) => editor.key(c, format),
+                            Edit::Enter => editor.enter(format),
+                            Edit::Paste(s) => editor.paste(&s, format),
+                            Edit::Backspace => editor.delete(true, format),
+                            Edit::Delete => editor.delete(false, format),
+                            Edit::Indent => editor.key(' ', format),
                             Edit::Unindent => {}
-                        }
-                        self.mark_dirty();
-                        self.sync();
+                        });
                     }
                     other => {
                         self.content.perform(other);
@@ -483,34 +567,27 @@ impl App {
                 return self.scroll_task();
             }
             Message::Key(c) => {
-                self.editor.key(c, &self.prefs.format);
-                self.mark_dirty();
+                self.edit_tape(|editor, format| editor.key(c, format));
             }
             Message::DoubleZero => {
-                self.editor.paste("00", &self.prefs.format);
-                self.mark_dirty();
+                self.edit_tape(|editor, format| editor.paste("00", format));
             }
             Message::Enter => {
-                self.editor.enter(&self.prefs.format);
-                self.mark_dirty();
+                self.edit_tape(|editor, format| editor.enter(format));
             }
             Message::Backspace => {
-                self.editor.delete(true, &self.prefs.format);
-                self.mark_dirty();
+                self.edit_tape(|editor, format| editor.delete(true, format));
             }
             Message::Undo => {
-                self.editor.undo(&self.prefs.format);
-                self.mark_dirty();
+                self.edit_tape(|editor, format| editor.undo(format));
             }
             Message::Redo => {
-                self.editor.redo(&self.prefs.format);
-                self.mark_dirty();
+                self.edit_tape(|editor, format| editor.redo(format));
             }
             Message::Clear => {
                 self.menu = false;
-                self.editor.clear(&self.prefs.format);
+                self.edit_tape(|editor, format| editor.clear(format));
                 self.scroll = 0.0;
-                self.mark_dirty();
             }
             Message::Menu => {
                 self.menu = !self.menu;
@@ -722,7 +799,11 @@ impl App {
                             return Ok(None);
                         };
                         let path = file.path().to_path_buf();
-                        storage::load(&path).map(|doc| Some((path, doc)))
+                        tokio::task::spawn_blocking(move || {
+                            storage::load(&path).map(|doc| Some((path, doc)))
+                        })
+                        .await
+                        .map_err(|e| format!("Open worker failed: {e}"))?
                     },
                     |result| Message::Opened(Box::new(result)),
                 );
@@ -767,7 +848,8 @@ impl App {
                             };
                             file.path().to_path_buf()
                         };
-                        match kind {
+                        let destination = path.clone();
+                        tokio::task::spawn_blocking(move || match kind {
                             FileKind::Native => storage::save(&path, &doc),
                             FileKind::Text => storage::atomic_write(
                                 &path,
@@ -779,8 +861,10 @@ impl App {
                             FileKind::Excel => {
                                 storage::export_xlsx(&path, &doc.text, &doc.preferences.format)
                             }
-                        }?;
-                        Ok(Some((path, kind)))
+                        })
+                        .await
+                        .map_err(|e| format!("Export worker failed: {e}"))??;
+                        Ok(Some((destination, kind)))
                     },
                     move |result| Message::Saved(tab_id, revision, result),
                 );
@@ -803,24 +887,18 @@ impl App {
                     self.pending_close = None;
                 }
             },
+            Message::WorkspaceSaved(revision, closing, result) => {
+                return self.workspace_saved(revision, closing, result);
+            }
             Message::Tick => {
-                self.omarchy_colors = system_theme::omarchy_colors();
+                if self.prefs.theme_mode == storage::ThemeMode::System {
+                    self.omarchy_colors = self.theme_watcher.poll();
+                }
                 if self
                     .copied
                     .is_some_and(|(_, time)| time.elapsed() > Duration::from_secs(2))
                 {
                     self.copied = None;
-                }
-                if self.dirty {
-                    match self.save_workspace() {
-                        Ok(()) => {
-                            self.dirty = false;
-                            self.autosaved = true;
-                        }
-                        Err(e) => {
-                            self.notify(format!("Autosave failed: {e}"));
-                        }
-                    }
                 }
                 if self
                     .toast
@@ -829,7 +907,7 @@ impl App {
                 {
                     self.toast = None;
                 }
-                return Task::none();
+                return self.start_workspace_save();
             }
             Message::Resize(size) => {
                 self.width = size.width;
@@ -838,11 +916,8 @@ impl App {
                 return Task::none();
             }
             Message::Quit(id) => {
-                if let Err(e) = self.save_workspace() {
-                    self.notify(format!("Could not save before closing: {e}"));
-                    return Task::none();
-                }
-                return window::close(id);
+                self.exit_request = Some(tabs::ExitRequest::Window(id));
+                return self.start_workspace_save();
             }
             Message::Example(i) => {
                 let example = match i {
@@ -1179,8 +1254,7 @@ impl App {
                     ),
                     self.menu_item("Export…", Message::ExportMenu),
                     self.menu_item("Settings", Message::Settings),
-                    self.menu_item("Guide & examples       F1", Message::Help),
-                    self.menu_item("Close menu             Esc", Message::Close)
+                    self.menu_item("Guide & examples       F1", Message::Help)
                 ]
             };
             let panel = self
@@ -1584,23 +1658,17 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
         _ => None,
     }
 }
-fn standard_icon(kind: &str, color: Color) -> widget::Svg<'static> {
-    let path = match kind {
-        "menu" => "M4 6h16 M4 12h16 M4 18h16",
-        "copy" => {
-            "M10 8h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"
-        }
-        "check" => "M5 12l4 4L19 6",
-        "close" => "M6 6l12 12 M18 6L6 18",
-        "undo" => "M3 10h11a7 7 0 0 1 7 7v3 M3 10l6-6 M3 10l6 6",
-        "redo" => "M21 10H10a7 7 0 0 0-7 7v3 M21 10l-6-6 M21 10l-6 6",
-        _ => "M9 4h12v16H9l-7-8z M12 9l6 6 M18 9l-6 6",
+fn standard_icon(kind: &str, color: Color) -> widget::Canvas<appearance::Icon, Message> {
+    let kind = match kind {
+        "menu" => "menu",
+        "copy" => "copy",
+        "check" => "check",
+        "close" => "close",
+        "undo" => "undo",
+        "redo" => "redo",
+        _ => "backspace",
     };
-    let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="{path}" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>"#
-    );
-    widget::svg(widget::svg::Handle::from_memory(svg.into_bytes()))
+    canvas(appearance::Icon { kind, color })
         .width(19)
         .height(19)
-        .style(move |_, _| widget::svg::Style { color: Some(color) })
 }

@@ -262,7 +262,7 @@ pub fn calculate(text: &str, f: &Format) -> Tape {
             failed = false;
             reset = false;
         }
-        let mut l = lines[i].clone();
+        let l = &mut lines[i];
         l.block = block;
         let outcome = (|| -> Result<(), String> {
             if let Some(e) = &l.error {
@@ -342,7 +342,6 @@ pub fn calculate(text: &str, f: &Format) -> Tape {
         }
         l.result = if failed { D::zero() } else { running.clone() };
         l.count = count;
-        lines[i] = l;
     }
     // Display the completed block result even while the caret is on an earlier operand.
     let mut block_results = BTreeMap::new();

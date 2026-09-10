@@ -71,3 +71,18 @@ The root install.sh downloads only from this project's GitHub releases and check
 - Re-running the installer updates the app. It does not register an automatic updater or a package repository.
 
 Remove native Linux packages through the package manager. For a per-user Linux install, remove only ~/.local/bin/numpad, ~/.local/share/applications/numpad.desktop, and ~/.local/share/icons/hicolor/256x256/apps/numpad.png. On macOS, move the app and unwanted app backups to Trash. Session data and saved documents remain separate.
+
+## In-app update compatibility
+
+About checks `/repos/tsubaie/numpad/releases/latest` and accepts stable `vX.Y.Z` tags. Keep the asset names above and publish SHA256SUMS before exposing the release. Unix updates embed the installer shipped with the running app; Windows expects `NumPad.exe` at the ZIP root. Do not change these contracts without a compatible transition.
+
+Windows helper tests use mocked downloads and real temporary ZIP/checksum/replacement operations:
+
+```powershell
+foreach ($scenario in @("success", "bad-checksum", "duplicate-checksum", "missing-executable", "replacement-fails", "invalid-version", "save-canceled")) {
+    & pwsh -NoProfile -File tests/update_windows.tests.ps1 -Scenario $scenario
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+```
+
+The Linux UI suite supplies a child-only curl shim to test available/current/offline states without contacting GitHub or installing anything. Native installer/portal interaction on Windows, macOS, and Wayland still warrants manual testing before release.

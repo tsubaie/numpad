@@ -9,6 +9,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,16 +184,23 @@ pub fn data_directory() -> PathBuf {
 pub fn session_path() -> PathBuf {
     data_directory().join("session.numpad")
 }
+static NEXT_WRITE: AtomicU64 = AtomicU64::new(0);
+
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("Cannot create folder: {e}"))?;
     }
     let temporary = path.with_file_name(format!(
-        ".{}.{}.tmp",
+        ".{}.{}.{}.tmp",
         path.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id()
+        std::process::id(),
+        NEXT_WRITE.fetch_add(1, Ordering::Relaxed)
     ));
-    let mut file = fs::File::create(&temporary).map_err(|e| format!("Cannot save file: {e}"))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|e| format!("Cannot save file: {e}"))?;
     file.write_all(bytes)
         .and_then(|_| file.sync_all())
         .map_err(|e| format!("Cannot write file: {e}"))?;
@@ -340,104 +348,17 @@ pub fn export_xlsx(path: &Path, text: &str, f: &Format) -> Result<(), String> {
     atomic_write(path, &book.save_to_buffer().map_err(|e| e.to_string())?)
 }
 pub fn export_pdf(path: &Path, text: &str, f: &Format) -> Result<(), String> {
-    use printpdf::*;
-    let mut pdf = PdfDocument::new("NumPad calculation");
-    // Use an installed font; no system font is redistributed with the application.
     let font_paths = [
         "C:/Windows/Fonts/consola.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
         "/System/Library/Fonts/Supplemental/Courier New.ttf",
     ];
-    let custom_font = font_paths
+    let font = font_paths
         .iter()
-        .find_map(|p| fs::read(p).ok())
-        .and_then(|bytes| ParsedFont::from_bytes(&bytes, 0, &mut Vec::new()))
-        .map(|font| pdf.add_font(&font));
-    let rendered = text_export(text, f);
-    if custom_font.is_none() && !rendered.is_ascii() {
-        return Err("PDF export needs an installed Consolas, DejaVu Sans Mono or Courier New font for Unicode text. Text and Excel export remain available.".into());
-    }
-    let mut rows = vec![];
-    for row in rendered.lines() {
-        let chars: Vec<char> = row.chars().collect();
-        if chars.is_empty() {
-            rows.push(String::new());
-        } else {
-            for chunk in chars.chunks(92) {
-                rows.push(chunk.iter().collect::<String>());
-            }
-        }
-    }
-    if rows.is_empty() {
-        rows.push(String::new());
-    }
-    let mut pages = vec![];
-    for (page_index, chunk) in rows.chunks(54).enumerate() {
-        let mut ops = vec![
-            Op::StartTextSection,
-            Op::SetTextCursor {
-                pos: Point::new(Mm(16.0), Mm(281.0)),
-            },
-            Op::SetFontSizeBuiltinFont {
-                size: Pt(17.0),
-                font: BuiltinFont::HelveticaBold,
-            },
-            Op::WriteTextBuiltinFont {
-                items: vec![TextItem::Text("NumPad".into())],
-                font: BuiltinFont::HelveticaBold,
-            },
-            Op::EndTextSection,
-        ];
-        for (i, line) in chunk.iter().enumerate() {
-            ops.push(Op::StartTextSection);
-            ops.push(Op::SetTextCursor {
-                pos: Point::new(Mm(16.0), Mm(266.0 - i as f32 * 4.3)),
-            });
-            if let Some(font) = &custom_font {
-                ops.push(Op::SetFontSize {
-                    size: Pt(9.0),
-                    font: font.clone(),
-                });
-                ops.push(Op::WriteText {
-                    items: vec![TextItem::Text(line.clone())],
-                    font: font.clone(),
-                });
-            } else {
-                ops.push(Op::SetFontSizeBuiltinFont {
-                    size: Pt(9.0),
-                    font: BuiltinFont::Courier,
-                });
-                ops.push(Op::WriteTextBuiltinFont {
-                    items: vec![TextItem::Text(line.clone())],
-                    font: BuiltinFont::Courier,
-                });
-            }
-            ops.push(Op::EndTextSection);
-        }
-        ops.extend([
-            Op::StartTextSection,
-            Op::SetTextCursor {
-                pos: Point::new(Mm(16.0), Mm(14.0)),
-            },
-            Op::SetFontSizeBuiltinFont {
-                size: Pt(8.0),
-                font: BuiltinFont::Helvetica,
-            },
-            Op::WriteTextBuiltinFont {
-                items: vec![TextItem::Text(format!(
-                    "Page {}  |  Exported from NumPad",
-                    page_index + 1
-                ))],
-                font: BuiltinFont::Helvetica,
-            },
-            Op::EndTextSection,
-        ]);
-        pages.push(PdfPage::new(Mm(210.0), Mm(297.0), ops));
-    }
-    let bytes = pdf
-        .with_pages(pages)
-        .save(&PdfSaveOptions::default(), &mut Vec::new());
+        .filter_map(|p| fs::read(p).ok())
+        .find(|bytes| ttf_parser::Face::parse(bytes, 0).is_ok());
+    let bytes = crate::pdf_export::render(&text_export(text, f), font.as_deref())?;
     atomic_write(path, &bytes)
 }
 pub fn memory_value(text: &str) -> Number {

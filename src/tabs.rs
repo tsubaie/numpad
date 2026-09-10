@@ -1,6 +1,15 @@
 use super::*;
 use iced::widget::column;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub(super) enum ExitRequest {
+    Window(window::Id),
+    LastTab,
+    #[cfg(target_os = "windows")]
+    Restart(PathBuf),
+}
 
 pub struct Tab {
     pub id: u64,
@@ -8,8 +17,9 @@ pub struct Tab {
 }
 
 pub struct TapeState {
+    saved_document: Arc<Document>,
     editor: Editor,
-    content: text_editor::Content,
+    content: TapeContent,
     prefs: Preferences,
     memory: Number,
     file: Option<PathBuf>,
@@ -20,7 +30,7 @@ pub struct TapeState {
 
 #[derive(Serialize, Deserialize)]
 struct SavedTab {
-    document: Document,
+    document: Arc<Document>,
     file: Option<PathBuf>,
     modified: bool,
 }
@@ -36,11 +46,17 @@ impl TapeState {
     fn new(document: Document, file: Option<PathBuf>, modified: bool) -> Self {
         let mut editor = Editor::new(document.text, &document.preferences.format);
         editor.recalculate(&document.preferences.format, false);
+        let memory = storage::memory_value(&document.memory);
         Self {
-            content: text_editor::Content::with_text(&editor.text),
+            saved_document: Arc::new(Document::new(
+                editor.text.clone(),
+                document.preferences.clone(),
+                memory.normalized().to_plain_string(),
+            )),
+            content: TapeContent::with_text(&editor.text),
             editor,
             prefs: document.preferences,
-            memory: storage::memory_value(&document.memory),
+            memory,
             file,
             scroll: 0.0,
             modified,
@@ -49,11 +65,7 @@ impl TapeState {
     }
     fn saved(&self) -> SavedTab {
         SavedTab {
-            document: Document::new(
-                self.editor.text.clone(),
-                self.prefs.clone(),
-                self.memory.normalized().to_plain_string(),
-            ),
+            document: Arc::clone(&self.saved_document),
             file: self.file.clone(),
             modified: self.modified,
         }
@@ -67,6 +79,7 @@ impl App {
 
     fn take_tape(&mut self) -> TapeState {
         TapeState {
+            saved_document: Arc::new(self.document()),
             editor: std::mem::replace(
                 &mut self.editor,
                 Editor::new(String::new(), &self.prefs.format),
@@ -107,7 +120,7 @@ impl App {
             self.tabs[self.active_tab].state = Some(self.take_tape());
             self.active_tab = index;
             self.install_tape(state);
-            self.dirty = true;
+            self.dirty_workspace();
         }
     }
 
@@ -119,7 +132,7 @@ impl App {
             state: Some(TapeState::new(document, file, modified)),
         });
         self.switch_tab(id);
-        self.dirty = true;
+        self.dirty_workspace();
     }
 
     pub(super) fn open_document(&mut self, path: PathBuf, mut document: Document) {
@@ -180,36 +193,13 @@ impl App {
             self.active_tab -= 1;
         }
         self.modal = None;
-        self.dirty = true;
+        self.dirty_workspace();
         false
     }
 
     pub(super) fn exit_last_tab(&mut self) -> Task<Message> {
-        // Closing a tape must not resurrect its discarded contents at next launch.
-        // Keep the in-memory tape intact until persistence succeeds.
-        let workspace = Workspace {
-            version: 1,
-            active: 0,
-            tabs: vec![SavedTab {
-                document: Document::new(String::new(), self.prefs.clone(), "0".into()),
-                file: None,
-                modified: false,
-            }],
-        };
-        let saved = serde_json::to_vec_pretty(&workspace)
-            .map_err(|e| e.to_string())
-            .and_then(|bytes| {
-                storage::atomic_write(
-                    &storage::session_path().with_file_name("workspace.json"),
-                    &bytes,
-                )
-            });
-        if let Err(error) = saved {
-            self.notify(format!("Could not close the last tab: {error}"));
-            return Task::none();
-        }
-        self.dirty = false;
-        window::latest().and_then(window::close)
+        self.exit_request = Some(ExitRequest::LastTab);
+        self.start_workspace_save()
     }
 
     pub(super) fn finish_save(&mut self, id: u64, revision: u64, path: PathBuf) -> bool {
@@ -233,7 +223,7 @@ impl App {
         } else {
             false
         };
-        self.dirty = true;
+        self.dirty_workspace();
         if self.pending_close == Some(id) {
             self.pending_close = None;
             if unchanged {
@@ -247,6 +237,9 @@ impl App {
         for state in self.tabs.iter_mut().filter_map(|t| t.state.as_mut()) {
             state.prefs.theme_mode = self.prefs.theme_mode;
             state.prefs.dark = self.prefs.dark;
+            let document = Arc::make_mut(&mut state.saved_document);
+            document.preferences.theme_mode = self.prefs.theme_mode;
+            document.preferences.dark = self.prefs.dark;
         }
     }
 
@@ -258,7 +251,7 @@ impl App {
             .map(|(index, tab)| {
                 if index == self.active_tab {
                     SavedTab {
-                        document: self.document(),
+                        document: Arc::new(self.document()),
                         file: self.file.clone(),
                         modified: self.modified,
                     }
@@ -274,12 +267,102 @@ impl App {
         }
     }
 
-    pub(super) fn save_workspace(&self) -> Result<(), String> {
-        let bytes = serde_json::to_vec_pretty(&self.workspace()).map_err(|e| e.to_string())?;
-        storage::atomic_write(
-            &storage::session_path().with_file_name("workspace.json"),
-            &bytes,
+    pub(super) fn dirty_workspace(&mut self) {
+        self.workspace_revision += 1;
+        self.dirty = true;
+        self.autosaved = false;
+    }
+
+    pub(super) fn start_workspace_save(&mut self) -> Task<Message> {
+        if self.autosave_pending || (!self.dirty && self.exit_request.is_none()) {
+            return Task::none();
+        }
+        let closing = self.exit_request.is_some();
+        let workspace = if matches!(self.exit_request, Some(ExitRequest::LastTab)) {
+            // An in-flight ordinary save finishes before this blank session is
+            // queued, so discarded text cannot reappear after closing.
+            Workspace {
+                version: 1,
+                active: 0,
+                tabs: vec![SavedTab {
+                    document: Arc::new(Document::new(
+                        String::new(),
+                        self.prefs.clone(),
+                        "0".into(),
+                    )),
+                    file: None,
+                    modified: false,
+                }],
+            }
+        } else {
+            self.workspace()
+        };
+        let revision = self.workspace_revision;
+        let path = storage::session_path().with_file_name("workspace.json");
+        #[cfg(target_os = "windows")]
+        let update_directory = match &self.exit_request {
+            Some(ExitRequest::Restart(directory)) => Some(directory.clone()),
+            _ => None,
+        };
+        self.autosave_pending = true;
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let bytes = serde_json::to_vec(&workspace).map_err(|e| e.to_string())?;
+                    let result = storage::atomic_write(&path, &bytes);
+                    #[cfg(target_os = "windows")]
+                    if let Some(directory) = update_directory {
+                        if result.is_ok() {
+                            // Only a durably saved session authorizes replacement.
+                            storage::atomic_write(&directory.join("commit"), b"ready")?;
+                        } else {
+                            let _ = std::fs::write(directory.join("cancel"), b"save failed");
+                        }
+                    }
+                    result
+                })
+                .await
+                .map_err(|e| format!("Session save worker failed: {e}"))?
+            },
+            move |result| Message::WorkspaceSaved(revision, closing, result),
         )
+    }
+
+    pub(super) fn workspace_saved(
+        &mut self,
+        revision: u64,
+        closing: bool,
+        result: Result<(), String>,
+    ) -> Task<Message> {
+        self.autosave_pending = false;
+        if let Err(error) = result {
+            self.dirty = true;
+            #[cfg(target_os = "windows")]
+            if matches!(self.exit_request, Some(ExitRequest::Restart(_))) {
+                self.update_state = updates::State::Failed("The update was canceled because your session could not be saved. The installed binary is unchanged.".into());
+            }
+            self.exit_request = None;
+            self.notify(format!("Autosave failed: {error}"));
+            return Task::none();
+        }
+        if revision == self.workspace_revision {
+            self.dirty = false;
+            self.autosaved = true;
+        }
+        if closing && let Some(exit) = self.exit_request.take() {
+            return match exit {
+                ExitRequest::Window(id) => window::close(id),
+                ExitRequest::LastTab => window::latest().and_then(window::close),
+                #[cfg(target_os = "windows")]
+                ExitRequest::Restart(_) => window::latest().and_then(window::close),
+            };
+        }
+        // Flush a final snapshot after an older write completes. Ordinary
+        // edits are coalesced until the next tick rather than flooding disk.
+        if self.exit_request.is_some() {
+            return self.start_workspace_save();
+        }
+        Task::none()
     }
 
     pub(super) fn restore_workspace(&mut self) -> Result<(), String> {
@@ -304,8 +387,9 @@ impl App {
             if !matches!(tab.document.version, 1 | 2) || tab.document.text.len() > 1_000_000 {
                 return Err("Invalid document in workspace session".into());
             }
-            tab.document.preferences.zoom = tab.document.preferences.zoom.clamp(0.6, 2.0);
-            tab.document.preferences.format.digits = tab.document.preferences.format.digits.min(12);
+            let document = Arc::make_mut(&mut tab.document);
+            document.preferences.zoom = document.preferences.zoom.clamp(0.6, 2.0);
+            document.preferences.format.digits = document.preferences.format.digits.min(12);
         }
         self.tabs = workspace
             .tabs
@@ -313,7 +397,11 @@ impl App {
             .enumerate()
             .map(|(index, tab)| Tab {
                 id: index as u64,
-                state: Some(TapeState::new(tab.document, tab.file, tab.modified)),
+                state: Some(TapeState::new(
+                    Arc::unwrap_or_clone(tab.document),
+                    tab.file,
+                    tab.modified,
+                )),
             })
             .collect();
         self.next_tab_id = self.tabs.len() as u64;
@@ -443,6 +531,57 @@ mod tests {
     use super::*;
     use crate::dialogs::tests::app;
 
+    #[test]
+    fn inactive_snapshots_are_shared_and_keep_in_flight_preferences() {
+        let mut app = app();
+        let _ = app.update(Message::NewTab);
+        let before = app.workspace();
+        let next = app.workspace();
+        assert!(Arc::ptr_eq(
+            &before.tabs[0].document,
+            &next.tabs[0].document
+        ));
+        app.prefs.theme_mode = storage::ThemeMode::Dark;
+        app.propagate_theme();
+        let after = app.workspace();
+        assert_eq!(
+            before.tabs[0].document.preferences.theme_mode,
+            storage::ThemeMode::System
+        );
+        assert_eq!(
+            after.tabs[0].document.preferences.theme_mode,
+            storage::ThemeMode::Dark
+        );
+    }
+    #[test]
+    fn old_workspace_completion_does_not_clear_newer_changes() {
+        let mut app = app();
+        app.dirty_workspace();
+        let old_revision = app.workspace_revision;
+        app.autosave_pending = true;
+        app.dirty_workspace();
+        let _ = app.workspace_saved(old_revision, false, Ok(()));
+        assert!(app.dirty);
+        assert!(!app.autosaved);
+        let _ = app.workspace_saved(app.workspace_revision, false, Ok(()));
+        assert!(!app.dirty);
+        assert!(app.autosaved);
+    }
+    #[test]
+    fn close_waits_for_old_save_then_queues_final_snapshot() {
+        let mut app = app();
+        app.autosave_pending = true;
+        let _ = app.exit_last_tab();
+        assert!(matches!(app.exit_request, Some(ExitRequest::LastTab)));
+        let _ = app.workspace_saved(app.workspace_revision, false, Ok(()));
+        assert!(app.autosave_pending);
+        assert!(app.exit_request.is_some());
+        let _ = app.workspace_saved(app.workspace_revision, true, Err("disk full".into()));
+        assert!(!app.autosave_pending);
+        assert!(app.exit_request.is_none());
+        assert!(app.dirty);
+        assert_eq!(app.editor.text, "1.5");
+    }
     #[test]
     fn switching_preserves_independent_editing_and_memory() {
         let mut app = app();

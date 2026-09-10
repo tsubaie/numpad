@@ -1,8 +1,18 @@
 use bigdecimal::{BigDecimal as D, RoundingMode};
 use num_traits::{One, ToPrimitive, Zero};
-use std::{num::NonZeroU64, str::FromStr};
+use std::{num::NonZeroU64, str::FromStr, sync::LazyLock};
 
 pub type Number = D;
+static MAX_VALUE: LazyLock<D> = LazyLock::new(|| dec("1e32"));
+static EPSILON: LazyLock<D> = LazyLock::new(|| dec("1e-62"));
+static HALF: LazyLock<D> = LazyLock::new(|| dec("0.5"));
+static THREE_QUARTERS: LazyLock<D> = LazyLock::new(|| dec("0.75"));
+static ONE_AND_HALF: LazyLock<D> = LazyLock::new(|| dec("1.5"));
+static LN_TWO: LazyLock<D> =
+    LazyLock::new(|| dec("0.693147180559945309417232121458176568075500134360255254120680009493"));
+static TAU: LazyLock<D> =
+    LazyLock::new(|| dec("6.283185307179586476925286766559005768394338798750211641949889184615"));
+static LN_TEN: LazyLock<D> = LazyLock::new(|| logarithm(&D::from(10)).expect("ln(10) is defined"));
 pub fn dec(s: &str) -> D {
     D::from_str(s).expect("decimal constant")
 }
@@ -10,7 +20,7 @@ pub fn rounded(v: D) -> D {
     v.with_precision_round(NonZeroU64::new(60).unwrap(), RoundingMode::HalfUp)
 }
 pub fn checked(v: D) -> Result<D, String> {
-    if v.abs() >= dec("1e32") {
+    if v.abs() >= *MAX_VALUE {
         return Err("Number exceeds 32 integer digits".into());
     }
     Ok(rounded(v))
@@ -50,7 +60,7 @@ pub fn power(a: &D, b: &D) -> Result<D, String> {
         }
         return checked(a.powi(n));
     }
-    if b == &dec("0.5") {
+    if b == &*HALF {
         return a
             .sqrt()
             .map(rounded)
@@ -67,14 +77,14 @@ pub fn logarithm(x: &D) -> Result<D, String> {
     }
     let mut v = x.clone();
     let mut n: i32 = 0;
-    while v > dec("1.5") {
+    while v > *ONE_AND_HALF {
         v = rounded(v / 2);
         n += 1;
         if n > 500 {
             return Err("Value is too large".into());
         }
     }
-    while v < dec("0.75") {
+    while v < *THREE_QUARTERS {
         v = rounded(v * 2);
         n -= 1;
         if n < -500 {
@@ -89,15 +99,11 @@ pub fn logarithm(x: &D) -> Result<D, String> {
         term = rounded(term * &z2);
         let add = rounded(&term / D::from(2 * i + 1));
         sum += &add;
-        if add.abs() < dec("1e-62") {
+        if add.abs() < *EPSILON {
             break;
         }
     }
-    Ok(rounded(
-        sum * 2
-            + D::from(n)
-                * dec("0.693147180559945309417232121458176568075500134360255254120680009493"),
-    ))
+    Ok(rounded(sum * 2 + D::from(n) * &*LN_TWO))
 }
 pub fn exponential(x: &D) -> Result<D, String> {
     if x > &D::from(74) {
@@ -109,7 +115,7 @@ pub fn exponential(x: &D) -> Result<D, String> {
     let negative = x < &D::zero();
     let mut v = x.abs();
     let mut squarings = 0;
-    while v > dec("0.5") {
+    while v > *HALF {
         v = rounded(v / 2);
         squarings += 1;
     }
@@ -118,7 +124,7 @@ pub fn exponential(x: &D) -> Result<D, String> {
     for i in 1..250 {
         term = rounded(term * &v / D::from(i));
         sum += &term;
-        if term.abs() < dec("1e-62") {
+        if term.abs() < *EPSILON {
             break;
         }
     }
@@ -134,8 +140,8 @@ fn sin_cos(x: &D, cosine: bool) -> Result<D, String> {
     if x.abs() > 1_000_000 {
         return Err("Angle is too large".into());
     }
-    let tau = dec("6.283185307179586476925286766559005768394338798750211641949889184615");
-    let v = rounded(x - (&(x / &tau).with_scale(0) * &tau));
+    let tau = &*TAU;
+    let v = rounded(x - (&(x / tau).with_scale(0) * tau));
     let negative_square = -rounded(&v * &v);
     let mut term = if cosine { D::one() } else { v };
     let mut sum = term.clone();
@@ -143,7 +149,7 @@ fn sin_cos(x: &D, cosine: bool) -> Result<D, String> {
         let n = if cosine { 2 * i - 1 } else { 2 * i };
         term = rounded(term * &negative_square / D::from(n * (n + 1)));
         sum += &term;
-        if term.abs() < dec("1e-62") {
+        if term.abs() < *EPSILON {
             break;
         }
     }
@@ -158,7 +164,7 @@ pub fn function(name: &str, x: &D) -> Result<D, String> {
         "abs" => Ok(x.abs()),
         "round" => Ok(x.with_scale_round(2, RoundingMode::HalfUp)),
         "ln" => logarithm(x),
-        "log" => div(&logarithm(x)?, &logarithm(&D::from(10))?),
+        "log" => div(&logarithm(x)?, &LN_TEN),
         "exp" => exponential(x),
         "sin" => sin_cos(x, false),
         "cos" => sin_cos(x, true),

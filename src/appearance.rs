@@ -222,3 +222,90 @@ impl<Message> canvas::Program<Message> for Paper {
         vec![f.into_geometry()]
     }
 }
+
+/// The seven UI marks use the existing canvas renderer, not an SVG decoder.
+pub struct Icon {
+    pub kind: &'static str,
+    pub color: Color,
+}
+impl<Message> canvas::Program<Message> for Icon {
+    type State = ();
+    fn draw(
+        &self,
+        _: &(),
+        renderer: &Renderer,
+        _: &Theme,
+        bounds: Rectangle,
+        _: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        frame.scale_nonuniform(iced::Vector::new(bounds.width / 24.0, bounds.height / 24.0));
+        let path = canvas::Path::new(|p| {
+            let mut line = |points: &[(f32, f32)]| {
+                if let Some(&(x, y)) = points.first() {
+                    p.move_to(Point::new(x, y));
+                    for &(x, y) in &points[1..] {
+                        p.line_to(Point::new(x, y));
+                    }
+                }
+            };
+            match self.kind {
+                "menu" => {
+                    line(&[(4., 6.), (20., 6.)]);
+                    line(&[(4., 12.), (20., 12.)]);
+                    line(&[(4., 18.), (20., 18.)]);
+                }
+                "copy" => {
+                    line(&[
+                        (16., 8.),
+                        (16., 5.),
+                        (14., 3.),
+                        (5., 3.),
+                        (3., 5.),
+                        (3., 14.),
+                        (5., 16.),
+                        (8., 16.),
+                    ]);
+                    p.rounded_rectangle(Point::new(8., 8.), Size::new(13., 13.), 2.0.into());
+                }
+                "check" => line(&[(5., 12.), (9., 16.), (19., 6.)]),
+                "close" => {
+                    line(&[(6., 6.), (18., 18.)]);
+                    line(&[(18., 6.), (6., 18.)]);
+                }
+                "undo" | "redo" => {
+                    let flip = self.kind == "redo";
+                    let pt = |x, y| Point::new(if flip { 24.0 - x } else { x }, y);
+                    p.move_to(pt(9., 4.));
+                    p.line_to(pt(3., 10.));
+                    p.line_to(pt(9., 16.));
+                    p.move_to(pt(3., 10.));
+                    p.line_to(pt(14., 10.));
+                    p.bezier_curve_to(pt(18., 10.), pt(21., 13.), pt(21., 17.));
+                    p.line_to(pt(21., 20.));
+                }
+                _ => {
+                    line(&[
+                        (9., 4.),
+                        (21., 4.),
+                        (21., 20.),
+                        (9., 20.),
+                        (2., 12.),
+                        (9., 4.),
+                    ]);
+                    line(&[(12., 9.), (18., 15.)]);
+                    line(&[(18., 9.), (12., 15.)]);
+                }
+            }
+        });
+        frame.stroke(
+            &path,
+            canvas::Stroke::default()
+                .with_color(self.color)
+                .with_width(1.8)
+                .with_line_cap(canvas::LineCap::Round)
+                .with_line_join(canvas::LineJoin::Round),
+        );
+        vec![frame.into_geometry()]
+    }
+}

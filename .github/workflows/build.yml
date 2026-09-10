@@ -86,8 +86,16 @@ jobs:
       - name: Validate scripts
         if: runner.os == 'Linux'
         run: |
-          shellcheck install.sh scripts/setup-nfpm.sh scripts/verify-linux-packages.sh scripts/package-macos.sh
+          shellcheck install.sh scripts/update-unix.sh scripts/setup-nfpm.sh scripts/verify-linux-packages.sh scripts/package-macos.sh
           python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Verify Windows updater replacement and rollback
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($scenario in @("success", "bad-checksum", "duplicate-checksum", "missing-executable", "replacement-fails", "invalid-version", "save-canceled")) {
+            & pwsh -NoProfile -File tests/update_windows.tests.ps1 -Scenario $scenario
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - run: cargo fmt --check
       - run: cargo clippy --release --locked --target ${{ matrix.target }} --all-targets -- -D warnings
       - run: cargo test --release --locked --target ${{ matrix.target }}
