@@ -303,7 +303,7 @@ fn main() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|t| t["name"].as_str().unwrap_or("").contains("@tsubaie"))
+            .any(|t| t["name"] == "Created by tsubaie ↗")
     });
     assert!(
         !dir.join("update-requested").exists(),
