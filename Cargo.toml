@@ -1,6 +1,6 @@
 [package]
 name = "numpad"
-version = "1.3.0"
+version = "1.3.1"
 edition = "2024"
 description = "A native calculation tape with comments and live totals"
 license = "MIT"

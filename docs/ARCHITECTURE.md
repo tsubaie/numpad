@@ -1,6 +1,6 @@
 # NumPad architecture
 
-NumPad is an offline Rust application with Iced 0.14. Source is built independently from observable CalcTape behavior. No webview, Electron runtime, accounts or network service is required.
+NumPad is a native Rust desktop application with Iced 0.14. Source is built independently from observable CalcTape behavior. No webview or Electron runtime is required.
 
 ## Boundaries
 

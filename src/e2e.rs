@@ -31,6 +31,7 @@ impl Operation<Vec<Target>> for Probe {
     }
     fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
         for name in [
+            "close-active-tab",
             "menu-toggle",
             "active-tab",
             "tape-surface",

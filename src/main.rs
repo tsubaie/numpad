@@ -554,13 +554,19 @@ impl App {
                 return Task::batch([widget::operation::focus("tape"), self.scroll_task()]);
             }
             Message::CloseTab(id) => {
-                self.request_close_tab(id);
+                if self.request_close_tab(id) {
+                    return self.exit_last_tab();
+                }
             }
             Message::CloseCurrentTab => {
-                self.request_close_tab(self.tab_id());
+                if self.request_close_tab(self.tab_id()) {
+                    return self.exit_last_tab();
+                }
             }
             Message::DiscardTab(id) => {
-                self.discard_tab(id);
+                if self.discard_tab(id) {
+                    return self.exit_last_tab();
+                }
             }
             Message::SaveCloseTab(id) => {
                 self.switch_tab(id);
@@ -785,8 +791,8 @@ impl App {
                         "Saved {}",
                         path.file_name().unwrap_or_default().to_string_lossy()
                     ));
-                    if kind == FileKind::Native {
-                        self.finish_save(tab_id, revision, path);
+                    if kind == FileKind::Native && self.finish_save(tab_id, revision, path) {
+                        return self.exit_last_tab();
                     }
                 }
                 Err(e) => {
@@ -1126,7 +1132,7 @@ impl App {
         };
         let body = row![tape, sidebar].spacing(16).height(Fill);
         let footer = row![
-            text("NumPad 1.3  ·  Local & offline").size(10),
+            text(concat!("NumPad ", env!("CARGO_PKG_VERSION"))).size(10),
             Space::new().width(Fill),
             text(format!(
                 "{} lines  ·  {} named values",

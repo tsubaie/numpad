@@ -332,10 +332,14 @@ impl App {
                 .spacing(4)
                 .into(),
                 self.guide_content(*tab),
-                text("NumPad 1.3 · Local & offline · Built with Rust + Iced")
-                    .size(12)
-                    .color(p.muted)
-                    .into(),
+                text(concat!(
+                    "NumPad ",
+                    env!("CARGO_PKG_VERSION"),
+                    " · Built with Rust + Iced"
+                ))
+                .size(12)
+                .color(p.muted)
+                .into(),
             ),
         };
         self.card(
@@ -418,7 +422,7 @@ pub(crate) mod tests {
     fn zoom_shortcuts_work_without_shift() {
         for (key, amount) in [("+", 1), ("=", 1), ("-", -1), ("0", 0)] {
             assert!(
-                matches!(shortcut(&keyboard::Key::Character(key.into()), keyboard::Modifiers::CTRL), Some(Message::Zoom(delta)) if delta == amount)
+                matches!(shortcut(&keyboard::Key::Character(key.into()), keyboard::Modifiers::COMMAND), Some(Message::Zoom(delta)) if delta == amount)
             );
         }
     }

@@ -147,7 +147,7 @@ impl App {
         self.add_tab(document, native.then_some(path), !native);
     }
 
-    pub(super) fn request_close_tab(&mut self, id: u64) {
+    pub(super) fn request_close_tab(&mut self, id: u64) -> bool {
         let modified = if id == self.tab_id() {
             self.modified
         } else {
@@ -159,18 +159,18 @@ impl App {
         };
         if modified {
             self.modal = Some(Modal::CloseTab(id));
+            false
         } else {
-            self.discard_tab(id);
+            self.discard_tab(id)
         }
     }
 
-    pub(super) fn discard_tab(&mut self, id: u64) {
+    pub(super) fn discard_tab(&mut self, id: u64) -> bool {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
-            return;
+            return false;
         };
         if self.tabs.len() == 1 {
-            let document = Document::new(String::new(), self.prefs.clone(), "0".into());
-            self.add_tab(document, None, false);
+            return true;
         } else if index == self.active_tab {
             let next = if index > 0 { index - 1 } else { 1 };
             self.switch_tab(self.tabs[next].id);
@@ -181,9 +181,38 @@ impl App {
         }
         self.modal = None;
         self.dirty = true;
+        false
     }
 
-    pub(super) fn finish_save(&mut self, id: u64, revision: u64, path: PathBuf) {
+    pub(super) fn exit_last_tab(&mut self) -> Task<Message> {
+        // Closing a tape must not resurrect its discarded contents at next launch.
+        // Keep the in-memory tape intact until persistence succeeds.
+        let workspace = Workspace {
+            version: 1,
+            active: 0,
+            tabs: vec![SavedTab {
+                document: Document::new(String::new(), self.prefs.clone(), "0".into()),
+                file: None,
+                modified: false,
+            }],
+        };
+        let saved = serde_json::to_vec_pretty(&workspace)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                storage::atomic_write(
+                    &storage::session_path().with_file_name("workspace.json"),
+                    &bytes,
+                )
+            });
+        if let Err(error) = saved {
+            self.notify(format!("Could not close the last tab: {error}"));
+            return Task::none();
+        }
+        self.dirty = false;
+        window::latest().and_then(window::close)
+    }
+
+    pub(super) fn finish_save(&mut self, id: u64, revision: u64, path: PathBuf) -> bool {
         let unchanged = if id == self.tab_id() {
             self.file = Some(path);
             if self.revision == revision {
@@ -208,9 +237,10 @@ impl App {
         if self.pending_close == Some(id) {
             self.pending_close = None;
             if unchanged {
-                self.discard_tab(id);
+                return self.discard_tab(id);
             }
         }
+        false
     }
 
     pub(super) fn propagate_theme(&mut self) {
@@ -325,10 +355,18 @@ impl App {
                             .padding([9, 10])
                             .on_press(Message::SwitchTab(tab.id))
                             .style(button::text),
-                        button(standard_icon("close", p.muted).width(13).height(13))
-                            .padding(8)
-                            .on_press(Message::CloseTab(tab.id))
-                            .style(button::text),
+                        button(
+                            container(standard_icon("close", p.muted).width(13).height(13)).id(
+                                if index == self.active_tab {
+                                    "close-active-tab"
+                                } else {
+                                    "close-inactive-tab"
+                                }
+                            )
+                        )
+                        .padding(8)
+                        .on_press(Message::CloseTab(tab.id))
+                        .style(button::text),
                     ]
                     .align_y(alignment::Vertical::Center),
                 )
@@ -444,18 +482,33 @@ mod tests {
     }
 
     #[test]
-    fn closing_dirty_tabs_requires_a_choice_and_last_tab_is_replaced() {
+    fn closing_dirty_last_tab_requests_exit_without_replacement() {
         let mut app = app();
         let _ = app.update(Message::Key('2'));
         let first = app.tab_id();
-        app.request_close_tab(first);
+        assert!(!app.request_close_tab(first));
         assert!(matches!(app.modal, Some(Modal::CloseTab(_))));
         let _ = app.update(Message::Close);
         assert_eq!(app.tabs.len(), 1);
-        app.discard_tab(first);
+        let next_id = app.next_tab_id;
+        assert!(app.discard_tab(first));
         assert_eq!(app.tabs.len(), 1);
-        assert!(app.editor.text.is_empty());
+        assert_eq!(app.tab_id(), first);
+        assert_eq!(app.next_tab_id, next_id);
+        assert!(app.modified);
+    }
+
+    #[test]
+    fn last_tab_save_closes_only_the_saved_revision() {
+        let mut app = app();
+        let id = app.tab_id();
+        app.pending_close = Some(id);
+        assert!(!app.finish_save(id, app.revision + 1, PathBuf::from("tape.numpad")));
+        app.pending_close = Some(id);
+        assert!(app.finish_save(id, app.revision, PathBuf::from("tape.numpad")));
         assert!(!app.modified);
+        assert!(app.request_close_tab(id));
+        assert!(!app.discard_tab(u64::MAX));
     }
 
     #[test]

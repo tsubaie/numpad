@@ -9,7 +9,7 @@
     <img src="https://img.shields.io/badge/built_with-Rust_%2B_Iced-cba6f7" alt="Built with Rust and Iced">
   </p>
   <p><a href="#install">Install</a> · <a href="#how-the-tape-works">Quick start</a> · <a href="#screenshots">Screenshots</a> · <a href="#development-and-testing">Development</a></p>
-  <p><sub>Local & offline · Linux, macOS & Windows · Rust + Iced · MIT licensed</sub></p>
+  <p><sub>Linux, macOS & Windows · Rust + Iced · MIT licensed</sub></p>
 </div>
 
 ![NumPad dark theme: three document tabs, an editable project estimate, named rates, VAT, and calculator memory](docs/images/numpad-dark.png)
@@ -27,6 +27,8 @@ NumPad is for the working behind a number: a project estimate, a shopping list, 
 - **A native desktop app.** Written in Rust with Iced. No browser runtime, account, or server required.
 
 ## Screenshots
+
+Closing the last tab exits NumPad. Unsaved changes offer **Save & close**, **Discard**, or **Cancel**.
 
 The same fictional estimate in Light. Each active tab joins the tape below it; the calculator and totals stay alongside your work.
 
@@ -120,7 +122,7 @@ Prefer a per-user Linux install or a specific version?
 
 ~~~sh
 curl -fsSL https://raw.githubusercontent.com/tsubaie/numpad/main/install.sh | NUMPAD_INSTALL=tarball sh
-curl -fsSL https://raw.githubusercontent.com/tsubaie/numpad/main/install.sh | NUMPAD_VERSION=1.3.0 sh
+curl -fsSL https://raw.githubusercontent.com/tsubaie/numpad/main/install.sh | NUMPAD_VERSION=1.3.1 sh
 ~~~
 
 ### Download a package
@@ -217,8 +219,8 @@ cargo clippy --all-targets --locked -- -D warnings
 
 ### Real UI regression tests (Linux)
 
-The UI suite adapts [RusTXT](https://github.com/tsubaie/RusTXT)'s isolated real-process and crash/restart approach to
-Iced. It drives the actual application with X11 mouse and keyboard events.
+The UI suite launches NumPad in isolated processes and drives the actual application
+with X11 mouse and keyboard events, including forced-restart recovery checks.
 
 Install `Xvfb`, `xvfb-run`, `xdotool`, and system fonts (Ubuntu packages:
 `xvfb xdotool fonts-dejavu-core`), then run:

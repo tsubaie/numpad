@@ -129,6 +129,18 @@ impl App {
         x(&["type", "--clearmodifiers", "--delay", "12", "--", text]);
     }
     fn click(&mut self, name: &str) {
+        self.click_target(name, true);
+    }
+    fn settle(&mut self) {
+        // A queued probe may still describe the previous widget tree. Require
+        // two subsequent observations before using geometry or sending input.
+        for _ in 0..2 {
+            let frame = self.state()["frame"].clone();
+            self.wait("settled UI frame", |s| s["frame"] != frame);
+        }
+    }
+    fn click_target(&mut self, name: &str, stays_open: bool) {
+        self.settle();
         let s = self.wait(name, |s| {
             s["targets"]
                 .as_array()
@@ -149,10 +161,27 @@ impl App {
             &format!("{px:.0}"),
             &format!("{py:.0}"),
         ]);
-        let frame = s["frame"].clone();
-        let moved = self.wait("pointer frame", |s| s["frame"] != frame);
-        x(&["click", "1"]);
-        self.wait("click frame", |s| s["frame"] != moved["frame"]);
+        self.settle();
+        x(&["mousedown", "1"]);
+        self.settle();
+        x(&["mouseup", "1"]);
+        if stays_open {
+            self.settle();
+        }
+    }
+    fn wait_exit(&mut self) {
+        let start = Instant::now();
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                assert!(status.success(), "last tab must exit cleanly");
+                return;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "last tab did not close the app"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
     }
     fn replace(&self, text: &str) {
         self.key("ctrl+a");
@@ -343,11 +372,37 @@ fn main() {
             })
     });
     drop(app);
-    let mut app = App::launch(dir);
+    let mut app = App::launch(dir.clone());
     app.wait("crash recovery", |s| {
         s["tabs"] == 2 && s["active"] == 1 && s["text"].as_str().unwrap_or("").trim() == "42.00"
     });
-    println!("PASS crash recovery; all UI scenarios passed");
+    println!("PASS crash recovery");
+    app.key("ctrl+w");
+    app.wait("dirty close prompt", |s| s["modal"] == true);
+    app.click("Cancel");
+    app.wait("close canceled", |s| s["modal"] == false && s["tabs"] == 2);
+    app.key("ctrl+w");
+    app.click("Discard");
+    app.wait("one tab left", |s| s["tabs"] == 1);
+    app.click_target("close-active-tab", false);
+    app.wait_exit();
+    drop(app);
+    let mut app = App::launch(dir);
+    app.wait("fresh tape after last close", |s| {
+        s["tabs"] == 1 && s["text"] == ""
+    });
+    app.type_text("7");
+    app.wait("unsaved last tape", |s| s["text"] == "7");
+    app.key("ctrl+w");
+    app.wait("last unsaved prompt", |s| s["modal"] == true);
+    app.click("Cancel");
+    app.wait("last close canceled", |s| {
+        s["modal"] == false && s["text"] == "7"
+    });
+    app.key("ctrl+w");
+    app.click_target("Discard", false);
+    app.wait_exit();
+    println!("PASS last-tab exit and unsaved-change protection; all UI scenarios passed");
 }
 
 // Reproducible screenshots of real widgets with fictional, checked-in data.

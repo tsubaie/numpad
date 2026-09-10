@@ -16,8 +16,8 @@ Documentation-only pushes skip native builds. Superseded branch/PR runs are canc
 4. Tag that exact commit and push the tag:
 
 ~~~sh
-git tag -a v1.3.0 -m "NumPad 1.3.0"
-git push origin v1.3.0
+git tag -a v1.3.1 -m "NumPad 1.3.1"
+git push origin v1.3.1
 ~~~
 
 Use the actual release version, not necessarily the example. Packaging rejects a tag that does not match Cargo.toml. Do not move a published version tag.

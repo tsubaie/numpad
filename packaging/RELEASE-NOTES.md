@@ -1,6 +1,17 @@
-## NumPad 1.3.0
+## NumPad 1.3.1
 
-A native, offline calculation tape for Windows, Linux, and macOS.
+A native calculation tape for Windows, Linux, and macOS.
+
+### What's new
+
+- Connected document tabs with independent tapes, memory, undo history, and session recovery.
+- Closing the last tab exits the application. Unsaved changes still offer Save & close, Discard, and Cancel.
+- Unified, tabbed Settings with Appearance, Numbers, Tax, and About; a worked-example guide.
+- System light/dark preference and Omarchy palette support, with explicit Light and Dark overrides.
+- Refined menus, tooltips, clipboard buttons, and memory controls; corrected mouse-wheel zoom and scrolling.
+- Updated README screenshots and automated UI regression checks, including last-tab exit and crash recovery.
+
+### Features
 
 - Editable calculations with notes, named values, percentages, memory, and live totals.
 - Top-to-bottom tape arithmetic; assignments use standard precedence.
