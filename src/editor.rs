@@ -81,6 +81,7 @@ impl Editor {
             self.restore(s, f);
         }
     }
+
     pub fn clear(&mut self, f: &Format) {
         self.record();
         self.text.clear();

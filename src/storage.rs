@@ -16,12 +16,20 @@ use std::{
 pub struct Preferences {
     pub format: Format,
     pub dark: bool,
+    pub theme_mode: ThemeMode,
     pub ruled: bool,
     pub mono: bool,
     pub zoom: f32,
     #[serde(skip_serializing)]
     pub custom: [CustomKey; 2],
     pub tax: Option<TaxSettings>,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomKey {
@@ -34,6 +42,7 @@ impl Default for Preferences {
         Self {
             format: Format::default(),
             dark: false,
+            theme_mode: ThemeMode::System,
             ruled: true,
             mono: true,
             zoom: 1.0,

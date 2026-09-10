@@ -2,7 +2,7 @@ use iced::advanced::text::{Highlighter, highlighter};
 use iced::widget::canvas::{self, Frame, Geometry};
 use iced::{Color, Font, Point, Rectangle, Renderer, Size, Theme, mouse};
 use std::ops::Range;
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Colors {
     pub background: Color,
     pub paper: Color,
@@ -66,7 +66,7 @@ impl Colors {
 pub struct HighlightSettings {
     pub rows: Vec<u8>,
     pub mono: bool,
-    pub dark: bool,
+    pub colors: Colors,
 }
 pub struct TapeHighlighter {
     settings: HighlightSettings,
@@ -76,8 +76,7 @@ pub struct TapeHighlighter {
 pub struct Highlight {
     pub style: u8,
     pub mono: bool,
-    pub dark: bool,
-    pub accent: Color,
+    pub colors: Colors,
 }
 impl Highlighter for TapeHighlighter {
     type Settings = HighlightSettings;
@@ -105,8 +104,7 @@ impl Highlighter for TapeHighlighter {
         let h = |style| Highlight {
             style,
             mono: self.settings.mono,
-            dark: self.settings.dark,
-            accent: Colors::new(self.settings.dark).accent,
+            colors: self.settings.colors,
         };
         let mut spans = vec![];
         if style == 1 || style == 3 || style == 4 {
@@ -144,10 +142,10 @@ impl Highlighter for TapeHighlighter {
     }
 }
 pub fn highlight(h: &Highlight, _: &Theme) -> highlighter::Format<Font> {
-    let colors = Colors::new(h.dark);
+    let colors = h.colors;
     highlighter::Format {
         color: Some(match h.style {
-            1 => h.accent,
+            1 => colors.accent,
             2 | 3 => colors.negative,
             4 => colors.muted,
             _ => colors.text,

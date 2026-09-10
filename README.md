@@ -1,37 +1,56 @@
 <div align="center">
-  <img src="docs/images/icon.png" width="140" height="140" alt="NumPad calculator icon">
+  <img src="docs/images/icon.png" width="100" height="100" alt="NumPad calculator icon">
   <h1>NumPad</h1>
   <p><strong>Your numbers. Your notes. One clear tape.</strong></p>
-  <p>A native, offline calculator with an editable tape.<br>Keep the calculation, the context, and the answer together.<br><sub>No account. No browser runtime. No cloud required.</sub></p>
+  <p>A native calculator that keeps the working, not just the answer.<br>Write numbers and notes, reuse named values, and organize your work in tabs.</p>
   <p>
     <a href="https://github.com/tsubaie/numpad/actions/workflows/build.yml"><img src="https://github.com/tsubaie/numpad/actions/workflows/build.yml/badge.svg?branch=main" alt="Native builds"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-a6e3a1" alt="MIT license"></a>
     <img src="https://img.shields.io/badge/built_with-Rust_%2B_Iced-cba6f7" alt="Built with Rust and Iced">
   </p>
-  <p><a href="#-install">Install</a> · <a href="https://github.com/tsubaie/numpad/releases/latest">Downloads</a> · <a href="#how-the-tape-works">How it works</a> · <a href="CONTRIBUTING.md">Contribute</a></p>
+  <p><a href="#install">Install</a> · <a href="#how-the-tape-works">Quick start</a> · <a href="#screenshots">Screenshots</a> · <a href="#development-and-testing">Development</a></p>
+  <p><sub>Local & offline · Linux, macOS & Windows · Rust + Iced · MIT licensed</sub></p>
 </div>
 
-![NumPad in Catppuccin Mocha, showing a project estimate with named values and 15% VAT](docs/images/numpad-dark.jpg)
+![NumPad dark theme: three document tabs, an editable project estimate, named rates, VAT, and calculator memory](docs/images/numpad-dark.png)
 
-## 🦀 Why NumPad
+## Why NumPad
 
 NumPad is for the working behind a number: a project estimate, a shopping list, a quick budget, or a calculation you want to revisit. Write numbers and notes on the same tape, then change any earlier value to update the totals below it.
 
-- **An editable calculation history.** Annotate individual amounts, separate calculations with notes, and keep subtotals alongside your work.
+- **A tape you can edit.** Annotate amounts, correct earlier inputs, and watch dependent subtotals update.
+- **Room for more than one task.** Connected document tabs keep separate tapes, memory, undo history, and files. Restore your open work after restarting.
 - **Named values that stay connected.** Define a rate or quantity once and reuse it throughout the tape.
 - **Everyday calculation tools.** Percentages, memory, scientific functions, and shared add/remove tax controls. VAT starts at 15% and is configurable.
-- **Two focused themes.** Catppuccin Mocha dark and a clean light theme, with optional ruled paper, a monospaced tape, and zoom.
+- **At home on your desktop.** Follow the system theme—including Omarchy's current palette—or choose Light or Dark. Adjust zoom, ruled paper, and the tape font in one tabbed Settings window.
 - **Your work stays local.** Automatic session recovery, portable `.numpad` documents, and exports to text, PDF, and Excel.
 - **A native desktop app.** Written in Rust with Iced. No browser runtime, account, or server required.
 
-## 📸 Screenshots
+## Screenshots
 
-Catppuccin Mocha above. A clean light theme below. The same calculation, with nothing hidden.
+The same fictional estimate in Light. Each active tab joins the tape below it; the calculator and totals stay alongside your work.
 
-![NumPad in the light theme, showing the same project estimate](docs/images/numpad-light.jpg)
+![NumPad light theme with connected document tabs and a project estimate totaling 2,875 including VAT](docs/images/numpad-light.png)
 
 
-<sub>Actual NumPad 1.3 screenshots captured on Windows with a fictional demo document. Both themes are available in Menu → Settings.</sub>
+<details>
+<summary><strong>Settings, the built-in guide, and About</strong></summary>
+
+Appearance, Numbers, Tax, and About live in one window. Save changes together, or cancel without changing your preferences.
+
+![Settings with Appearance, Numbers, Tax, and About tabs and System, Light, and Dark theme choices](docs/images/numpad-settings.png)
+
+The guide explains how sequential tape calculations differ from assignment expressions, with examples you can try.
+
+![NumPad's Getting started guide with worked examples and navigation to tape, tax, memory, and shortcuts](docs/images/numpad-guide.png)
+
+Project information, credits, and GitHub links are available inside the app.
+
+![NumPad About tab with app description, version, author, and GitHub links](docs/images/numpad-about.png)
+
+</details>
+
+<sub>Real Linux/X11 captures from the current source, using only fictional demo data. Screenshots may include improvements not yet in the latest packaged release. [Reproduce the screenshots](docs/SCREENSHOTS.md).</sub>
 
 ## How the tape works
 
@@ -48,6 +67,10 @@ Typing an operator starts a new tape line. Operations run **top to bottom**, lik
 ```
 
 Type `10+2*3`, then press **Enter** to produce this result. Enter closes a multi-operand calculation and inserts its subtotal.
+
+Use a blank line for an independent calculation block and **Enter** or **=** for a subtotal. Open **?** for the tabbed guide and worked examples.
+
+Use **+** in the tab bar or **Ctrl/Cmd+T** to create a separate tape. Each tab keeps its own calculation, memory, undo history, and file path while open. Open tabs and their contents recover after restarting; unsaved tabs ask before closing. **Ctrl/Cmd+Tab** switches tabs and **Ctrl/Cmd+W** closes the current tab.
 
 This is intentionally different from an assignment expression. In `answer = 10+2*3`, standard mathematical precedence applies, so `answer` is **16**.
 
@@ -75,7 +98,11 @@ Adding or subtracting a percentage applies it to the running amount. The two tax
 
 Removing included tax divides by `1.15`; it does not subtract 15% from the tax-inclusive amount. Button labels always reflect the saved rate. Number grouping uses three-digit groups, such as `1,000,000`.
 
-## 📦 Install
+**Menu → Settings** groups Appearance, Numbers, Tax, and About into tabs. Appearance includes the tape font choice; About includes project and author links. Changes apply together with **Save changes**; Cancel or Escape discards them. **Edit tax…** above the tax buttons opens the Tax tab directly.
+
+Theme defaults to **System**. On Omarchy, NumPad reads the current desktop palette and follows theme changes automatically without changing desktop configuration. On other desktops, it follows the system light/dark preference. Choose **Light** or **Dark** in Appearance to override this for NumPad.
+
+## Install
 
 ### Quick install — Linux and macOS
 
@@ -136,9 +163,9 @@ cargo run --release --locked
 
 The executable is **target/release/numpad.exe** on Windows, or **target/release/numpad** on Linux/macOS. See [builds and releases](docs/RELEASING.md) for local packaging, cache behavior, and publishing a version.
 
-## 🔧 Builds and releases
+## Builds and releases
 
-[GitHub Actions](https://github.com/tsubaie/numpad/actions/workflows/build.yml) runs formatting checks, Clippy, tests, native builds, and packaging. Linux packages are installed in Debian, Fedora, and Arch containers for headless export checks. Compilation and export checks do not replace interactive testing on every desktop.
+[GitHub Actions](https://github.com/tsubaie/numpad/actions/workflows/build.yml) runs formatting, Clippy, unit tests, real Linux UI tests, native builds, and packaging. Linux packages are installed in Debian, Fedora, and Arch containers for headless export checks. Releases require both native builds and the UI job to pass; other desktops still need manual interaction testing.
 
 - Rust dependencies and build outputs are cached per platform/toolchain; the packaging tool has its own cache.
 - Documentation-only changes skip native builds, and newer branch commits cancel superseded runs.
@@ -167,13 +194,51 @@ Use **Ctrl** on Windows/Linux and **Cmd** on macOS.
 | :--- | :--- |
 | Enter or `=` | Complete a multi-operand calculation |
 | Ctrl/Cmd + Z / Y | Undo / redo |
-| Ctrl/Cmd + N | Start a new tape, with undo available |
+| Ctrl/Cmd + N / T | Open a new tape tab |
+| Ctrl/Cmd + W | Close the current tab |
+| Ctrl/Cmd + Tab / Shift + Tab | Next / previous tab |
 | Ctrl/Cmd + O | Open a document |
 | Ctrl/Cmd + S | Save |
 | Ctrl/Cmd + Shift + S | Save as |
 | Ctrl/Cmd + Shift + L | Toggle ruled paper |
-| Ctrl/Cmd + Shift + plus / minus / 0 | Zoom in / out / reset |
+| Ctrl/Cmd + plus / minus / 0 | Zoom in / out / reset |
+| Ctrl + mouse wheel over the tape | Zoom in / out |
 | F1 | Open the guide and examples |
+
+## Development and testing
+
+Start with the [source-build instructions](#build-from-source), [contribution guide](CONTRIBUTING.md), and [architecture overview](docs/ARCHITECTURE.md).
+
+```sh
+cargo fmt --check
+cargo test --locked --bin numpad
+cargo clippy --all-targets --locked -- -D warnings
+```
+
+### Real UI regression tests (Linux)
+
+The UI suite adapts [RusTXT](https://github.com/tsubaie/RusTXT)'s isolated real-process and crash/restart approach to
+Iced. It drives the actual application with X11 mouse and keyboard events.
+
+Install `Xvfb`, `xvfb-run`, `xdotool`, and system fonts (Ubuntu packages:
+`xvfb xdotool fonts-dejavu-core`), then run:
+
+```sh
+cargo test --locked --bin numpad
+xvfb-run -a -s '-screen 0 1280x1024x24' cargo test --locked --features e2e --test e2e
+```
+
+Coverage includes connected-tab geometry and seam colors, editing, undo/redo,
+clipboard round-trips, menu click-away, Settings/About, theme Save/Cancel,
+compact layout, keyboard/wheel zoom, long-tape scrolling, independent tabs,
+and recovery after forced termination. Each run has isolated app/XDG data;
+logs, state, and screenshots remain in `test-results/e2e/`.
+
+The `e2e` feature enables read-only state/layout/screenshot probes only when
+`NUMPAD_E2E_DIR` is set. Distribution builds must not enable it. CI runs the
+suite separately from packaging and gates releases on it. These checks
+complement unit tests and visual review; native file dialogs, Wayland,
+Windows/macOS interactions, and exhaustive visual comparisons are not covered.
 
 ## Contributing
 
@@ -187,6 +252,8 @@ cargo test --release --locked
 cargo clippy --all-targets --locked -- -D warnings
 ```
 
-## License
+## Author and license
+
+Created by [@tsubaie](https://github.com/tsubaie). Have a bug or an idea? [Open an issue](https://github.com/tsubaie/numpad/issues).
 
 NumPad is available under the [MIT License](LICENSE). Third-party dependencies retain their respective licenses.

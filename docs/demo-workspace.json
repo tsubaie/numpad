@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "active": 0,
+  "tabs": [
+    {
+      "file": "Project estimate.numpad",
+      "modified": false,
+      "document": {
+        "version": 2,
+        "preferences": { "theme_mode": "Dark", "dark": true },
+        "memory": "2500",
+        "text": "PROJECT ESTIMATE\nDesign sprint · fictional example\n\nrate = 120\nhours = 18\n\n + rate    Hourly design rate\n * hours   Design & prototyping\n + 340     Asset production\n -----------------\n + 2500\n + 15%     VAT\n -----------------\n + 2875\n\nChange hours to update the estimate.\n"
+      }
+    },
+    {
+      "file": "Monthly budget.numpad",
+      "modified": false,
+      "document": {
+        "version": 2,
+        "preferences": { "theme_mode": "Dark", "dark": true },
+        "memory": "0",
+        "text": "MONTHLY BUDGET\nA separate tape, a separate calculation.\n\n + 1200    Workspace\n + 180     Software\n + 95      Internet\n -----------------\n + 1475\n"
+      }
+    },
+    {
+      "file": "Quick notes.numpad",
+      "modified": false,
+      "document": {
+        "version": 2,
+        "preferences": { "theme_mode": "Dark", "dark": true },
+        "memory": "0",
+        "text": "QUICK NOTES\nKeep an idea beside its numbers.\n\nx = 10+2*3\n"
+      }
+    }
+  ]
+}

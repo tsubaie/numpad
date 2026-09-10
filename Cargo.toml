@@ -5,6 +5,15 @@ edition = "2024"
 description = "A native calculation tape with comments and live totals"
 license = "MIT"
 
+[features]
+# Read-only UI probes; never enabled in distributed builds.
+e2e = []
+
+[[test]]
+name = "e2e"
+harness = false
+required-features = ["e2e"]
+
 [dependencies]
 iced = { version = "0.14", default-features = false, features = ["advanced", "canvas", "tokio", "tiny-skia", "x11", "wayland", "advanced-shaping", "image-without-codecs", "svg"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

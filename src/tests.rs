@@ -15,6 +15,21 @@ fn value(s: &str) -> String {
 fn tape_runs_top_to_bottom() {
     assert_eq!(value("+10\n+2\n*3\n---\n+0"), "36");
 }
+
+#[test]
+fn welcome_example_teaches_both_calculation_orders() {
+    let tape = engine::calculate(crate::INTRO, &Format::default());
+    assert!(tape.lines.iter().all(|line| line.error.is_none()));
+    assert!(
+        tape.lines
+            .iter()
+            .any(|line| line.kind == engine::Kind::Total && line.result == 36)
+    );
+    assert_eq!(
+        tape.variables.get("x").map(|(_, value)| value),
+        Some(&math::Number::from(16))
+    );
+}
 #[test]
 fn subtotal_continuation() {
     assert_eq!(value("10\n+2\n---\n+0\n*3\n---\n+0"), "36");

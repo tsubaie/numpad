@@ -1,9 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod appearance;
+mod dialogs;
+#[cfg(feature = "e2e")]
+mod e2e;
 mod editor;
 mod engine;
 mod math;
 mod storage;
+mod system_theme;
+mod tabs;
 #[cfg(test)]
 mod tests;
 
@@ -28,7 +33,7 @@ use std::{
 use storage::{Document, Preferences, TaxSettings};
 use text_editor::{Action, Binding, Edit};
 
-const INTRO: &str = "Welcome to NumPad\nType a calculation. Keep the story beside the numbers.\n\n +         255.50  Change this number\n -          66.00  Expenses\n +          33.70  Comments stay on the tape\n -----------------\n +          223.20\n\n";
+const INTRO: &str = "Welcome to NumPad\nTape operations run from top to bottom.\nType 10+2*3, then Enter: (10+2)*3 gives 36.\n\n +          10.00\n +           2.00\n *           3.00\n -----------------\n +          36.00\n\nAssignments use standard precedence: multiplication first.\nx = 10+2*3\n\nLeave a blank line for a separate calculation.\nPress Enter to insert a subtotal.\nUse + in the tab bar for a separate tape.\nOpen ? for worked examples and shortcuts.\n";
 const APP_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/app-icon.png"));
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum FileKind {
@@ -37,7 +42,7 @@ enum FileKind {
     Pdf,
     Excel,
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum CopyKind {
     Result,
     Grand,
@@ -53,6 +58,12 @@ enum MemoryOp {
 }
 #[derive(Debug, Clone)]
 enum Message {
+    #[cfg(feature = "e2e")]
+    Probe,
+    #[cfg(feature = "e2e")]
+    Probed(Vec<e2e::Target>),
+    #[cfg(feature = "e2e")]
+    Screenshot(window::Screenshot),
     Edit(Action),
     GlobalKey(keyboard::Key, keyboard::Modifiers),
     Key(char),
@@ -66,11 +77,26 @@ enum Message {
     ExportMenu,
     Help,
     Settings,
+    SettingsTab(dialogs::SettingsTab),
+    GuideTab(dialogs::GuideTab),
+    ModifiersChanged(keyboard::Modifiers),
+    OpenLink(dialogs::AboutLink),
+    LinkOpened(Result<(), String>),
+    NewTab,
+    SwitchTab(u64),
+    CloseTab(u64),
+    CloseCurrentTab,
+    DiscardTab(u64),
+    SaveCloseTab(u64),
+    CycleTab(bool),
+    Copied(CopyKind),
     Close,
     Zoom(i8),
     Ruled,
     Mono,
-    Dark,
+    ThemeMode(storage::ThemeMode),
+    SystemTheme(iced::theme::Mode),
+    TapeScrolled(f32, f32),
     Comma(bool),
     Copy(CopyKind),
     Memory(MemoryOp),
@@ -84,16 +110,16 @@ enum Message {
     Open,
     Save(FileKind, bool),
     Opened(Box<Result<Option<(PathBuf, Document)>, String>>),
-    Saved(Result<Option<(PathBuf, FileKind)>, String>),
+    Saved(u64, u64, Result<Option<(PathBuf, FileKind)>, String>),
     Tick,
     Resize(Size),
     Quit(window::Id),
     Example(usize),
 }
 enum Modal {
-    Help,
-    Settings,
-    Custom(TaxSettings),
+    CloseTab(u64),
+    Help(dialogs::GuideTab),
+    Settings(Box<dialogs::SettingsDraft>),
 }
 struct App {
     editor: Editor,
@@ -107,9 +133,20 @@ struct App {
     dirty: bool,
     autosaved: bool,
     toast: Option<(String, Instant)>,
+    copied: Option<(CopyKind, Instant)>,
     width: f32,
     height: f32,
-    scroll: usize,
+    scroll: f32,
+    tape_height: f32,
+    system_mode: iced::theme::Mode,
+    omarchy_colors: Option<Colors>,
+    tabs: Vec<tabs::Tab>,
+    active_tab: usize,
+    next_tab_id: u64,
+    modified: bool,
+    revision: u64,
+    pending_close: Option<u64>,
+    modifiers: keyboard::Modifiers,
 }
 
 fn main() -> iced::Result {
@@ -147,50 +184,57 @@ fn main() -> iced::Result {
 impl App {
     fn boot() -> (Self, Task<Message>) {
         let loaded = storage::load(&storage::session_path());
-        let mut doc = loaded
-            .as_ref()
-            .ok()
-            .cloned()
-            .unwrap_or_else(|| Document::new(INTRO.into(), Preferences::default(), "0".into()));
-        let argument = std::env::args().nth(1).map(PathBuf::from);
-        let mut file = None;
-        let mut failure = None;
-        if let Some(path) = argument {
-            match storage::load(&path) {
-                Ok(d) => {
-                    doc = d;
-                    file = Some(path);
-                }
-                Err(e) => failure = Some(e),
-            }
-        }
-        if failure.is_none()
-            && storage::session_path().exists()
-            && let Err(e) = loaded
-        {
-            failure = Some(format!("Could not restore the session: {e}"));
-        }
+        let failure = if storage::session_path().exists() {
+            loaded.as_ref().err().cloned()
+        } else {
+            None
+        };
+        let doc = loaded
+            .unwrap_or_else(|_| Document::new(INTRO.into(), Preferences::default(), "0".into()));
         let mut editor = Editor::new(doc.text, &doc.preferences.format);
         editor.recalculate(&doc.preferences.format, true);
-        let content = text_editor::Content::with_text(&editor.text);
+        let mut app = Self {
+            content: text_editor::Content::with_text(&editor.text),
+            editor,
+            prefs: doc.preferences,
+            memory: storage::memory_value(&doc.memory),
+            file: None,
+            menu: false,
+            exports: false,
+            modal: None,
+            dirty: false,
+            autosaved: true,
+            toast: failure.map(|e| (e, Instant::now())),
+            copied: None,
+            width: 1180.0,
+            height: 820.0,
+            scroll: 0.0,
+            tape_height: 580.0,
+            system_mode: iced::theme::Mode::Dark,
+            omarchy_colors: system_theme::omarchy_colors(),
+            tabs: vec![tabs::Tab { id: 0, state: None }],
+            active_tab: 0,
+            next_tab_id: 1,
+            modified: false,
+            revision: 0,
+            pending_close: None,
+            modifiers: keyboard::Modifiers::default(),
+        };
+        if let Err(error) = app.restore_workspace() {
+            app.notify(format!("Could not restore tabs: {error}"));
+        }
+        if let Some(path) = std::env::args().nth(1).map(PathBuf::from) {
+            match storage::load(&path) {
+                Ok(doc) => app.open_document(path, doc),
+                Err(error) => app.notify(error),
+            }
+        }
         (
-            Self {
-                editor,
-                content,
-                prefs: doc.preferences,
-                memory: storage::memory_value(&doc.memory),
-                file,
-                menu: false,
-                exports: false,
-                modal: None,
-                dirty: false,
-                autosaved: true,
-                toast: failure.map(|e| (e, Instant::now())),
-                width: 1180.0,
-                height: 820.0,
-                scroll: 0,
-            },
-            widget::operation::focus("tape"),
+            app,
+            Task::batch([
+                widget::operation::focus("tape"),
+                iced::system::theme().map(Message::SystemTheme),
+            ]),
         )
     }
     fn document(&self) -> Document {
@@ -225,14 +269,29 @@ impl App {
         )
     }
     fn colors(&self) -> Colors {
-        Colors::new(self.prefs.dark)
+        match self.prefs.theme_mode {
+            storage::ThemeMode::System => self
+                .omarchy_colors
+                .unwrap_or_else(|| Colors::new(self.system_mode == iced::theme::Mode::Dark)),
+            storage::ThemeMode::Light => Colors::new(false),
+            storage::ThemeMode::Dark => Colors::new(true),
+        }
     }
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
+            #[cfg(feature = "e2e")]
+            iced::time::every(Duration::from_millis(150)).map(|_| Message::Probe),
+            iced::system::theme_changes().map(Message::SystemTheme),
             iced::time::every(Duration::from_millis(900)).map(|_| Message::Tick),
             window::resize_events().map(|(_, s)| Message::Resize(s)),
             window::close_requests().map(Message::Quit),
             iced::event::listen_with(|event, status, _| {
+                if matches!(event, iced::Event::Window(window::Event::Unfocused)) {
+                    return Some(Message::ModifiersChanged(keyboard::Modifiers::default()));
+                }
+                if let iced::Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) = event {
+                    return Some(Message::ModifiersChanged(modifiers));
+                }
                 if status == iced::event::Status::Ignored
                     && let iced::Event::Keyboard(keyboard::Event::KeyPressed {
                         key, modifiers, ..
@@ -245,6 +304,8 @@ impl App {
         ])
     }
     fn mark_dirty(&mut self) {
+        self.modified = true;
+        self.revision += 1;
         self.dirty = true;
         self.autosaved = false;
     }
@@ -268,13 +329,24 @@ impl App {
                 column: p.column,
             }),
         });
-        let visible = ((self.height - 215.0) / (28.0 * self.prefs.zoom)).max(3.0) as usize;
-        if self.editor.caret.line < self.scroll {
-            self.scroll = self.editor.caret.line;
-        } else if self.editor.caret.line >= self.scroll + visible {
-            self.scroll = self.editor.caret.line - visible + 1;
+        let row_height = 28.0 * self.prefs.zoom;
+        let top = 12.0 + self.editor.caret.line as f32 * row_height;
+        if top < self.scroll {
+            self.scroll = (top - 12.0).max(0.0);
+        } else if top + row_height > self.scroll + self.tape_height {
+            self.scroll = (top + row_height + 12.0 - self.tape_height).max(0.0);
         }
     }
+    fn scroll_task(&self) -> Task<Message> {
+        widget::operation::scroll_to(
+            "tape-scroll",
+            widget::scrollable::AbsoluteOffset {
+                x: 0.0,
+                y: self.scroll,
+            },
+        )
+    }
+
     fn result(&self) -> Number {
         self.editor
             .tape
@@ -311,6 +383,31 @@ impl App {
     }
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            #[cfg(feature = "e2e")]
+            Message::Probe => return e2e::probe(),
+            #[cfg(feature = "e2e")]
+            Message::Screenshot(shot) => {
+                e2e::save_screenshot(shot);
+                return Task::none();
+            }
+            #[cfg(feature = "e2e")]
+            Message::Probed(targets) => {
+                e2e::snapshot(self, targets);
+                return Task::none();
+            }
+            Message::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers;
+                return Task::none();
+            }
+            Message::OpenLink(link) => {
+                return dialogs::open_link(link);
+            }
+            Message::LinkOpened(result) => {
+                if let Err(error) = result {
+                    self.notify(error);
+                }
+                return Task::none();
+            }
             Message::GlobalKey(key, modifiers) => {
                 if self.modal.is_some() {
                     if key == keyboard::Key::Named(keyboard::key::Named::Escape) {
@@ -321,6 +418,29 @@ impl App {
                 return shortcut(&key, modifiers)
                     .map(|msg| self.update(msg))
                     .unwrap_or_else(Task::none);
+            }
+            Message::SystemTheme(mode) => {
+                self.system_mode = mode;
+                return Task::none();
+            }
+            Message::TapeScrolled(offset, height) => {
+                self.scroll = offset;
+                self.tape_height = height;
+                return Task::none();
+            }
+            Message::Edit(Action::Scroll { lines }) => {
+                if self.modifiers.control() || self.modifiers.command() {
+                    return if lines == 0 {
+                        Task::none()
+                    } else {
+                        self.update(Message::Zoom(-lines.signum() as i8))
+                    };
+                }
+                let max = (self.content.line_count() as f32 * 28.0 * self.prefs.zoom + 24.0
+                    - self.tape_height)
+                    .max(0.0);
+                self.scroll = (self.scroll + lines as f32 * 28.0 * self.prefs.zoom).clamp(0.0, max);
+                return self.scroll_task();
             }
             Message::Edit(action) => {
                 let cursor = self.content.cursor();
@@ -347,9 +467,6 @@ impl App {
                         self.sync();
                     }
                     other => {
-                        if let Action::Scroll { lines } = &other {
-                            self.scroll = self.scroll.saturating_add_signed(-(*lines as isize));
-                        }
                         self.content.perform(other);
                         let cursor = self.content.cursor();
                         self.editor.caret = Pos {
@@ -362,7 +479,8 @@ impl App {
                         });
                     }
                 }
-                return Task::none();
+                self.sync();
+                return self.scroll_task();
             }
             Message::Key(c) => {
                 self.editor.key(c, &self.prefs.format);
@@ -389,8 +507,9 @@ impl App {
                 self.mark_dirty();
             }
             Message::Clear => {
+                self.menu = false;
                 self.editor.clear(&self.prefs.format);
-                self.scroll = 0;
+                self.scroll = 0.0;
                 self.mark_dirty();
             }
             Message::Menu => {
@@ -404,13 +523,60 @@ impl App {
                 return Task::none();
             }
             Message::Help => {
-                self.modal = Some(Modal::Help);
+                self.modal = Some(Modal::Help(dialogs::GuideTab::GettingStarted));
                 self.menu = false;
                 return Task::none();
             }
             Message::Settings => {
-                self.modal = Some(Modal::Settings);
+                self.open_settings(dialogs::SettingsTab::Appearance);
                 self.menu = false;
+                return Task::none();
+            }
+            Message::SettingsTab(tab) => {
+                if let Some(Modal::Settings(draft)) = &mut self.modal {
+                    draft.tab = tab;
+                }
+                return Task::none();
+            }
+            Message::GuideTab(tab) => {
+                self.modal = Some(Modal::Help(tab));
+                return Task::none();
+            }
+            Message::NewTab => {
+                self.add_tab(
+                    Document::new(String::new(), self.prefs.clone(), "0".into()),
+                    None,
+                    false,
+                );
+            }
+            Message::SwitchTab(id) => {
+                self.switch_tab(id);
+                return Task::batch([widget::operation::focus("tape"), self.scroll_task()]);
+            }
+            Message::CloseTab(id) => {
+                self.request_close_tab(id);
+            }
+            Message::CloseCurrentTab => {
+                self.request_close_tab(self.tab_id());
+            }
+            Message::DiscardTab(id) => {
+                self.discard_tab(id);
+            }
+            Message::SaveCloseTab(id) => {
+                self.switch_tab(id);
+                self.modal = None;
+                self.pending_close = Some(id);
+                return self.update(Message::Save(FileKind::Native, false));
+            }
+            Message::CycleTab(backward) => {
+                let len = self.tabs.len();
+                let index = (self.active_tab + if backward { len - 1 } else { 1 }) % len;
+                self.switch_tab(self.tabs[index].id);
+                return Task::batch([widget::operation::focus("tape"), self.scroll_task()]);
+            }
+            Message::Copied(kind) => {
+                self.copied = Some((kind, Instant::now()));
+                self.notify("Copied to clipboard");
                 return Task::none();
             }
             Message::Close => {
@@ -427,22 +593,37 @@ impl App {
                 self.mark_dirty();
             }
             Message::Ruled => {
+                if let Some(Modal::Settings(draft)) = &mut self.modal {
+                    draft.prefs.ruled = !draft.prefs.ruled;
+                    return Task::none();
+                }
                 self.prefs.ruled = !self.prefs.ruled;
                 self.mark_dirty();
             }
             Message::Mono => {
+                if let Some(Modal::Settings(draft)) = &mut self.modal {
+                    draft.prefs.mono = !draft.prefs.mono;
+                    return Task::none();
+                }
                 self.prefs.mono = !self.prefs.mono;
                 self.mark_dirty();
             }
             Message::Comma(value) => {
+                if let Some(Modal::Settings(draft)) = &mut self.modal {
+                    draft.prefs.format.comma = value;
+                    return Task::none();
+                }
                 let old = self.prefs.format.clone();
                 self.prefs.format.comma = value;
                 self.editor.format_changed(&old, &self.prefs.format);
                 self.mark_dirty();
             }
-            Message::Dark => {
-                self.prefs.dark = !self.prefs.dark;
-                self.mark_dirty();
+            Message::ThemeMode(mode) => {
+                if let Some(Modal::Settings(draft)) = &mut self.modal {
+                    draft.prefs.theme_mode = mode;
+                    draft.prefs.dark = mode == storage::ThemeMode::Dark;
+                }
+                return Task::none();
             }
             Message::Copy(kind) => {
                 let copied = match kind {
@@ -451,9 +632,8 @@ impl App {
                     CopyKind::Memory => engine::format(&self.memory, &self.prefs.format),
                     CopyKind::Tape => storage::text_export(&self.editor.text, &self.prefs.format),
                 };
-                self.notify("Copied to clipboard");
                 self.exports = false;
-                return iced::clipboard::write(copied);
+                return iced::clipboard::write(copied).chain(Task::done(Message::Copied(kind)));
             }
             Message::Memory(op) => {
                 let value = self.current_value();
@@ -481,40 +661,45 @@ impl App {
             }
             Message::EditCustom => {
                 self.menu = false;
-                self.modal = Some(Modal::Custom(self.prefs.tax_settings()));
+                self.open_settings(dialogs::SettingsTab::Tax);
                 return Task::none();
             }
             Message::CustomLabel(s) => {
-                if let Some(Modal::Custom(key)) = &mut self.modal {
-                    key.label = s.chars().take(16).collect();
+                if let Some(Modal::Settings(draft)) = &mut self.modal {
+                    draft.tax.label = s.chars().take(16).collect();
                 }
                 return Task::none();
             }
             Message::CustomFormula(s) => {
-                if let Some(Modal::Custom(key)) = &mut self.modal {
-                    key.rate = s;
+                if let Some(Modal::Settings(draft)) = &mut self.modal {
+                    draft.tax.rate = s;
                 }
                 return Task::none();
             }
             Message::CustomCalculate(v) => {
-                if let Some(Modal::Custom(key)) = &mut self.modal {
-                    key.calculate = v;
+                if let Some(Modal::Settings(draft)) = &mut self.modal {
+                    draft.tax.calculate = v;
                 }
                 return Task::none();
             }
             Message::CustomDefault => {
-                if let Some(Modal::Custom(key)) = &mut self.modal {
-                    *key = TaxSettings::default();
+                if let Some(Modal::Settings(draft)) = &mut self.modal {
+                    draft.tax = TaxSettings::default();
                 }
                 return Task::none();
             }
             Message::CustomApply => {
-                if let Some(Modal::Custom(key)) = &self.modal {
-                    if let Err(e) = key.validate() {
-                        self.notify(e);
+                if let Some(Modal::Settings(draft)) = &self.modal {
+                    if draft.tax.validate().is_err() {
                         return Task::none();
                     }
-                    self.prefs.tax = Some(key.clone());
+                    let old = self.prefs.format.clone();
+                    self.prefs = draft.prefs.clone();
+                    self.prefs.tax = Some(draft.tax.clone());
+                    self.propagate_theme();
+                    if old.comma != self.prefs.format.comma {
+                        self.editor.format_changed(&old, &self.prefs.format);
+                    }
                     self.modal = None;
                     self.mark_dirty();
                 }
@@ -538,16 +723,7 @@ impl App {
             }
             Message::Opened(result) => match *result {
                 Ok(Some((path, doc))) => {
-                    self.prefs = doc.preferences;
-                    self.editor.load(doc.text, &self.prefs.format);
-                    self.memory = storage::memory_value(&doc.memory);
-                    self.file = if path.extension().is_some_and(|s| s == "numpad") {
-                        Some(path)
-                    } else {
-                        None
-                    };
-                    self.scroll = 0;
-                    self.mark_dirty();
+                    self.open_document(path, doc);
                     self.notify("Document opened");
                 }
                 Err(e) => self.notify(e),
@@ -557,6 +733,8 @@ impl App {
                 self.menu = false;
                 self.exports = false;
                 let doc = self.document();
+                let tab_id = self.tab_id();
+                let revision = self.revision;
                 let existing = if !save_as && kind == FileKind::Native {
                     self.file.clone()
                 } else {
@@ -598,32 +776,43 @@ impl App {
                         }?;
                         Ok(Some((path, kind)))
                     },
-                    Message::Saved,
+                    move |result| Message::Saved(tab_id, revision, result),
                 );
             }
-            Message::Saved(result) => match result {
+            Message::Saved(tab_id, revision, result) => match result {
                 Ok(Some((path, kind))) => {
                     self.notify(format!(
                         "Saved {}",
                         path.file_name().unwrap_or_default().to_string_lossy()
                     ));
                     if kind == FileKind::Native {
-                        self.file = Some(path);
+                        self.finish_save(tab_id, revision, path);
                     }
                 }
-                Err(e) => self.notify(e),
-                _ => {}
+                Err(e) => {
+                    self.pending_close = None;
+                    self.notify(e);
+                }
+                _ => {
+                    self.pending_close = None;
+                }
             },
             Message::Tick => {
+                self.omarchy_colors = system_theme::omarchy_colors();
+                if self
+                    .copied
+                    .is_some_and(|(_, time)| time.elapsed() > Duration::from_secs(2))
+                {
+                    self.copied = None;
+                }
                 if self.dirty {
-                    match storage::save(&storage::session_path(), &self.document()) {
+                    match self.save_workspace() {
                         Ok(()) => {
                             self.dirty = false;
                             self.autosaved = true;
                         }
                         Err(e) => {
                             self.notify(format!("Autosave failed: {e}"));
-                            self.dirty = false;
                         }
                     }
                 }
@@ -639,10 +828,11 @@ impl App {
             Message::Resize(size) => {
                 self.width = size.width;
                 self.height = size.height;
+                self.tape_height = (size.height - 250.0).max(100.0);
                 return Task::none();
             }
             Message::Quit(id) => {
-                if let Err(e) = storage::save(&storage::session_path(), &self.document()) {
+                if let Err(e) = self.save_workspace() {
                     self.notify(format!("Could not save before closing: {e}"));
                     return Task::none();
                 }
@@ -663,7 +853,7 @@ impl App {
                 };
                 self.editor.load(example.into(), &self.prefs.format);
                 self.modal = None;
-                self.scroll = 0;
+                self.scroll = 0.0;
                 self.mark_dirty();
                 self.notify("Example loaded. Undo restores your previous tape.");
             }
@@ -672,7 +862,7 @@ impl App {
         if self.modal.is_some() {
             Task::none()
         } else {
-            widget::operation::focus("tape")
+            Task::batch([widget::operation::focus("tape"), self.scroll_task()])
         }
     }
     fn label(&self, key: &str) -> &str {
@@ -687,7 +877,21 @@ impl App {
         let p = self.colors();
         let zoom = self.prefs.zoom;
         let header = row![
-            self.small("☰", Message::Menu),
+            self.hint(
+                button(
+                    container(standard_icon("menu", p.text))
+                        .id("menu-toggle")
+                        .center_x(Fill)
+                        .center_y(Fill)
+                )
+                .width(36)
+                .height(36)
+                .padding(0)
+                .on_press(Message::Menu)
+                .style(move |_, status| key_style(p.card, p.text, status)),
+                "Menu",
+                widget::tooltip::Position::Bottom
+            ),
             widget::image(widget::image::Handle::from_bytes(APP_ICON))
                 .width(42)
                 .height(42),
@@ -716,18 +920,6 @@ impl App {
             self.optional("undo", Message::Undo, self.editor.can_undo()),
             self.optional("redo", Message::Redo, self.editor.can_redo()),
             self.small(if self.prefs.ruled { "≡" } else { "☷" }, Message::Ruled),
-            widget::tooltip(
-                self.small(
-                    if self.prefs.mono {
-                        "Monospace"
-                    } else {
-                        "Proportional"
-                    },
-                    Message::Mono
-                ),
-                "Switch tape font",
-                widget::tooltip::Position::Bottom
-            ),
             self.small("−", Message::Zoom(-1)),
             self.small(
                 &format!("{} %", (zoom * 100.0).round() as u32),
@@ -761,7 +953,7 @@ impl App {
             ruled: self.prefs.ruled,
             height: 28.0 * zoom,
             active: self.editor.caret.line,
-            scroll: self.scroll,
+            scroll: 0,
             rows: self
                 .editor
                 .tape
@@ -795,12 +987,12 @@ impl App {
             )))
             .wrapping(iced::widget::text::Wrapping::None)
             .padding(12)
-            .height(Fill)
+            .height((self.content.line_count() as f32 * 28.0 * zoom + 24.0).max(self.tape_height))
             .highlight_with::<appearance::TapeHighlighter>(
                 appearance::HighlightSettings {
                     rows: row_styles,
                     mono: self.prefs.mono,
-                    dark: self.prefs.dark,
+                    colors: p,
                 },
                 appearance::highlight,
             )
@@ -841,16 +1033,44 @@ impl App {
         ]
         .spacing(16)
         .align_y(alignment::Vertical::Center);
-        let tape = self
-            .card(
-                column![
-                    container(toolbar).padding([9, 12]),
-                    stack![paper, edit].height(Fill),
-                    container(statusbar).padding([10, 14])
-                ]
+        let tape = container(
+            column![
+                container(toolbar).padding([9, 12]),
+                container(
+                    scrollable(
+                        stack![paper, edit].height(
+                            (self.content.line_count() as f32 * 28.0 * zoom + 24.0)
+                                .max(self.tape_height)
+                        )
+                    )
+                    .id("tape-scroll")
+                    .on_scroll(|v| Message::TapeScrolled(v.absolute_offset().y, v.bounds().height))
+                    .height(Fill)
+                )
+                .clip(true)
                 .height(Fill),
-                p.card,
-            )
+                container(statusbar).padding([10, 14])
+            ]
+            .height(Fill),
+        )
+        .id("tape-surface")
+        .style(move |_| container::Style {
+            background: Some(p.paper.into()),
+            text_color: Some(p.text),
+            border: Border {
+                radius: iced::border::Radius {
+                    top_left: 0.0,
+                    top_right: 12.0,
+                    bottom_left: 12.0,
+                    bottom_right: 12.0,
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .width(FillPortion(1))
+        .height(Fill);
+        let tape = column![self.tab_bar(), tape]
             .width(FillPortion(1))
             .height(Fill);
         let result = column![
@@ -945,7 +1165,7 @@ impl App {
                 ]
             } else {
                 column![
-                    self.menu_item("New tape (undoable)     Ctrl+N", Message::Clear),
+                    self.menu_item("New tab                Ctrl+T", Message::NewTab),
                     self.menu_item("Open…                  Ctrl+O", Message::Open),
                     self.menu_item(
                         "Save                   Ctrl+S",
@@ -953,7 +1173,6 @@ impl App {
                     ),
                     self.menu_item("Export…", Message::ExportMenu),
                     self.menu_item("Settings", Message::Settings),
-                    self.menu_item("Tax settings", Message::EditCustom),
                     self.menu_item("Guide & examples       F1", Message::Help),
                     self.menu_item("Close menu             Esc", Message::Close)
                 ]
@@ -961,6 +1180,15 @@ impl App {
             let panel = self
                 .card(container(items.spacing(3)).padding(8), p.card)
                 .width(290);
+            layers = layers.push(
+                widget::mouse_area(
+                    container(Space::new().width(Fill).height(Fill))
+                        .width(Fill)
+                        .height(Fill),
+                )
+                .on_press(Message::Close)
+                .on_right_press(Message::Close),
+            );
             layers = layers.push(
                 container(widget::opaque(panel))
                     .padding(iced::Padding {
@@ -1057,12 +1285,20 @@ impl App {
         );
         rows = rows.push(
             row![
-                key("M+", Message::Memory(MemoryOp::Add), p.card, p.text),
-                key("M−", Message::Memory(MemoryOp::Subtract), p.card, p.text),
-                key("MR", Message::Memory(MemoryOp::Recall), p.card, p.text),
-                key("MC", Message::Memory(MemoryOp::Clear), p.card, p.text)
+                key("M+", Message::Memory(MemoryOp::Add), p.keypad, p.text),
+                key("M−", Message::Memory(MemoryOp::Subtract), p.keypad, p.text),
+                key("MR", Message::Memory(MemoryOp::Recall), p.keypad, p.text),
+                key("MC", Message::Memory(MemoryOp::Clear), p.keypad, p.text)
             ]
             .spacing(6),
+        );
+        rows = rows.push(
+            text(format!(
+                "M± uses {}",
+                engine::format(&self.current_value(), &self.prefs.format)
+            ))
+            .size(10)
+            .color(p.muted),
         );
         if fill {
             rows = rows.push(Space::new().height(Fill));
@@ -1073,7 +1309,7 @@ impl App {
             row![
                 text("TAX").size(10).color(p.muted),
                 Space::new().width(Fill),
-                self.small("Tax settings", Message::EditCustom)
+                self.small("Edit tax…", Message::EditCustom)
             ]
             .align_y(alignment::Vertical::Center),
         );
@@ -1096,14 +1332,6 @@ impl App {
             ]
             .spacing(6),
         );
-        rows = rows.push(
-            text(format!(
-                "M± uses {}",
-                engine::format(&self.current_value(), &self.prefs.format)
-            ))
-            .size(10)
-            .color(p.muted),
-        );
         rows.height(if fill { Fill } else { iced::Length::Shrink })
             .into()
     }
@@ -1114,21 +1342,97 @@ impl App {
         kind: CopyKind,
     ) -> Element<'a, Message> {
         let p = self.colors();
-        button(
-            row![
-                text(label).size(12).color(p.muted),
-                Space::new().width(Fill),
-                text(engine::format(value, &self.prefs.format)).size(14),
-                text("⧉").size(12).color(p.muted)
-            ]
-            .spacing(8),
-        )
-        .on_press(Message::Copy(kind))
-        .width(Fill)
-        .style(button::text)
-        .padding(0)
+        row![
+            text(label).size(12).color(p.muted),
+            Space::new().width(Fill),
+            text(engine::format(value, &self.prefs.format)).size(14),
+            self.hint(
+                button(
+                    container(
+                        standard_icon(
+                            if self.copied.is_some_and(|(copied, _)| copied == kind) {
+                                "check"
+                            } else {
+                                "copy"
+                            },
+                            p.accent
+                        )
+                        .width(16)
+                        .height(16)
+                    )
+                    .id(if kind == CopyKind::Grand {
+                        "copy-grand"
+                    } else {
+                        "copy-memory"
+                    })
+                    .center_x(Fill)
+                    .center_y(Fill)
+                )
+                .width(34)
+                .height(34)
+                .padding(0)
+                .on_press(Message::Copy(kind))
+                .style(move |_, status| button::Style {
+                    background: Some(
+                        if matches!(status, button::Status::Hovered | button::Status::Pressed) {
+                            p.selected
+                        } else {
+                            p.keypad
+                        }
+                        .into()
+                    ),
+                    text_color: p.accent,
+                    border: Border {
+                        radius: 12.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                if self.copied.is_some_and(|(copied, _)| copied == kind) {
+                    "Copied".to_owned()
+                } else {
+                    match kind {
+                        CopyKind::Memory => "Copy memory".to_owned(),
+                        _ => "Copy total".to_owned(),
+                    }
+                },
+                widget::tooltip::Position::Top
+            )
+        ]
+        .spacing(8)
+        .align_y(alignment::Vertical::Center)
         .into()
     }
+
+    fn hint<'a>(
+        &self,
+        content: impl Into<Element<'a, Message>>,
+        label: impl Into<String>,
+        position: widget::tooltip::Position,
+    ) -> Element<'a, Message> {
+        let p = self.colors();
+        widget::tooltip(content, text(label.into()).size(12), position)
+            .gap(8)
+            .padding(9)
+            .delay(Duration::from_millis(400))
+            .style(move |_| container::Style {
+                background: Some(p.card.into()),
+                text_color: Some(p.text),
+                border: Border {
+                    radius: 9.0.into(),
+                    width: 1.0,
+                    color: p.rule,
+                },
+                shadow: iced::Shadow {
+                    color: Color::from_rgba(0.0, 0.0, 0.0, 0.16),
+                    offset: iced::Vector::new(0.0, 3.0),
+                    blur_radius: 10.0,
+                },
+                ..Default::default()
+            })
+            .into()
+    }
+
     fn card<'a>(
         &self,
         content: impl Into<Element<'a, Message>>,
@@ -1146,13 +1450,6 @@ impl App {
             ..Default::default()
         })
     }
-    fn action<'a>(&self, label: &str, msg: Message, bg: Color, fg: Color) -> Element<'a, Message> {
-        button(text(label.to_owned()).size(13))
-            .on_press(msg)
-            .padding([8, 14])
-            .style(move |_, s| key_style(bg, fg, s))
-            .into()
-    }
     fn key_button<'a>(
         &self,
         label: &str,
@@ -1165,13 +1462,20 @@ impl App {
         } else {
             text(label.to_owned()).size(19).into()
         };
-        button(container(content).center_x(Fill).center_y(Fill))
+        let key = button(container(content).center_x(Fill).center_y(Fill))
             .padding(0)
             .on_press(msg)
             .height(if self.height < 740.0 { 43 } else { 49 })
             .width(Fill)
-            .style(move |_, s| key_style(bg, fg, s))
-            .into()
+            .style(move |_, s| key_style(bg, fg, s));
+        let hint = match label {
+            "M+" => "Add value to memory",
+            "M−" => "Subtract value from memory",
+            "MR" => "Insert memory at caret",
+            "MC" => "Clear memory",
+            _ => return key.into(),
+        };
+        self.hint(key, hint, widget::tooltip::Position::Top)
     }
     fn small<'a>(&self, label: &str, msg: Message) -> Element<'a, Message> {
         let p = self.colors();
@@ -1207,32 +1511,6 @@ impl App {
             .style(button::text)
             .into()
     }
-    fn modal_view<'a>(&'a self, modal: &'a Modal) -> Element<'a, Message> {
-        let p = self.colors();
-        let(title,content):(String,Element<'a,Message>)=match modal{
-            Modal::Settings=>("Preferences".into(),column![text("Appearance").size(13),text("One light theme. One cozy dark theme.").size(12).color(p.muted),checkbox(self.prefs.dark).label("Catppuccin Mocha dark theme").on_toggle(|_|Message::Dark),checkbox(self.prefs.ruled).label("Ruled paper").on_toggle(|_|Message::Ruled),checkbox(self.prefs.mono).label("Monospaced tape").on_toggle(|_|Message::Mono),checkbox(self.prefs.format.comma).label("Decimal comma (1.234,56)").on_toggle(Message::Comma),text("Documents and preferences are saved locally.\nNative .numpad files can be reopened on any supported OS.").size(12).color(p.muted)].spacing(14).into()),
-            Modal::Custom(key)=>("Tax settings".into(),column![text("Tax name").size(13),text_input("VAT",&key.label).on_input(Message::CustomLabel).padding(10),text("Rate (%) — shared by both buttons").size(13),text_input("15",&key.rate).on_input(Message::CustomFormula).padding(10),text(key.validate().err().unwrap_or_default()).size(12).color(p.negative),text("Add tax increases the net price. Remove tax extracts tax already included in a gross price. Both use this same rate.").size(12).color(p.muted),checkbox(key.calculate).label("Calculate after applying tax").on_toggle(Message::CustomCalculate),row![self.small("Default",Message::CustomDefault),Space::new().width(Fill),self.small("Cancel",Message::Close),self.action("Save",Message::CustomApply,p.accent,p.on_accent)].spacing(8)].spacing(14).into()),
-            Modal::Help=>("The NumPad guide".into(),scrollable(column![text("A calculator you can read back.").size(23),text("Type 10+2*3 and press Enter: the tape runs top-to-bottom, so the answer is 36. Assignments such as x = 10+2*3 keep standard precedence and give 16.").size(14),text("Calculate · Comment · Correct").size(17),text("Write a note after any number. Click an earlier value to change it: every dependent total updates. A blank line or a standalone note begins a new calculation. Enter after a single value simply starts a new row.").size(14),text("Percentages and named values").size(17),text("100+15% adds tax. 115/1.15 removes included tax. Define rate = 75, then use +rate. Names ignore letter case. Append = budget to a generated total to name it. Assignments accept arithmetic and functions such as sqrt(9), abs(-5), ln(10), log(100), sin(0) and exp(1). Angles use radians.").size(14),text("Keep calculations close").size(17),text("Ctrl+S saves a .numpad document; Ctrl+O opens one or a text tape. Export produces PDF, Excel or plain text. Your session recovers automatically after closing. M+ and M− use the value at your caret; MR inserts memory.").size(14),text("Keyboard").size(17),text("Enter / =    Calculate\nCtrl+Z / Ctrl+Y    Undo / redo\nCtrl+N / Ctrl+O / Ctrl+S    New / open / save\nCtrl+Shift+L    Toggle paper rules\nCtrl+Shift+plus/minus/0    Zoom / reset\nF1    Guide\nOn macOS, use Command instead of Ctrl.").font(Font::MONOSPACE).size(12),text("Try an example (Undo restores your tape)").size(14),row![self.small("Percentages",Message::Example(0)),self.small("Named values",Message::Example(1)),self.small("Subtotals",Message::Example(2))].spacing(8),text("NumPad 1.3 · Rust + Iced\nIndependent implementation. Behavioral reference: CalcTape Web.\nThe project docs include the reference specification and compatibility notes.").size(11).color(p.muted)].spacing(16)).height(480).into()),
-        };
-        self.card(
-            container(
-                column![
-                    row![
-                        text(title).size(21),
-                        Space::new().width(Fill),
-                        self.small("✕", Message::Close)
-                    ]
-                    .align_y(alignment::Vertical::Center),
-                    content
-                ]
-                .spacing(22),
-            )
-            .padding(26),
-            p.card,
-        )
-        .width(590)
-        .into()
-    }
 }
 fn key_style(bg: Color, fg: Color, status: button::Status) -> button::Style {
     let background = if matches!(status, button::Status::Hovered | button::Status::Pressed) {
@@ -1266,13 +1544,18 @@ fn key_binding(event: text_editor::KeyPress) -> Option<Binding<Message>> {
     Binding::from_key_press(event)
 }
 fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
+    if modifiers.command() && *key == keyboard::Key::Named(keyboard::key::Named::Tab) {
+        return Some(Message::CycleTab(modifiers.shift()));
+    }
     if modifiers.command()
         && let keyboard::Key::Character(c) = key.as_ref()
     {
         let message = match c.to_ascii_lowercase().as_str() {
             "s" => Some(Message::Save(FileKind::Native, modifiers.shift())),
             "o" => Some(Message::Open),
-            "n" => Some(Message::Clear),
+            "," => Some(Message::Settings),
+            "n" | "t" => Some(Message::NewTab),
+            "w" => Some(Message::CloseCurrentTab),
             "z" => Some(if modifiers.shift() {
                 Message::Redo
             } else {
@@ -1280,9 +1563,9 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
             }),
             "y" => Some(Message::Redo),
             "l" if modifiers.shift() => Some(Message::Ruled),
-            "=" | "+" if modifiers.shift() => Some(Message::Zoom(1)),
-            "-" if modifiers.shift() => Some(Message::Zoom(-1)),
-            "0" if modifiers.shift() => Some(Message::Zoom(0)),
+            "=" | "+" => Some(Message::Zoom(1)),
+            "-" | "_" => Some(Message::Zoom(-1)),
+            "0" => Some(Message::Zoom(0)),
             _ => None,
         };
         if let Some(m) = message {
@@ -1297,6 +1580,12 @@ fn shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Messa
 }
 fn standard_icon(kind: &str, color: Color) -> widget::Svg<'static> {
     let path = match kind {
+        "menu" => "M4 6h16 M4 12h16 M4 18h16",
+        "copy" => {
+            "M10 8h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2z M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"
+        }
+        "check" => "M5 12l4 4L19 6",
+        "close" => "M6 6l12 12 M18 6L6 18",
         "undo" => "M3 10h11a7 7 0 0 1 7 7v3 M3 10l6-6 M3 10l6 6",
         "redo" => "M21 10H10a7 7 0 0 0-7 7v3 M21 10l-6-6 M21 10l-6 6",
         _ => "M9 4h12v16H9l-7-8z M12 9l6 6 M18 9l-6 6",
