@@ -1,5 +1,68 @@
 # Performance and binary-size work
 
+## October 2026 reliability and performance pass
+
+Measured on Linux x86_64 with rustc 1.99.0 on 2026-10-14, against commit
+`9948248`. These are local measurements, not guarantees for other machines.
+
+The paper canvas now covers only the visible viewport. Unchanged system-palette
+polls no longer send redraw messages, and autosave/status ticks stop when idle.
+Scientific functions use a bounded cache keyed by function and exact normalized
+argument. Arithmetic validation checks scales before expensive operations without
+copying coefficients on the common path. Operand formatting retains tiny decimal
+values instead of applying the result display's 12-place rounding limit.
+
+The core is exposed as a library. The benchmark uses the same fresh editor state
+for each edit sample, five warmups, and median/p95 reporting. Both versions below
+used the same benchmark harness, compiler, dependencies, and release profile
+(speed level 3, full LTO, one codegen unit). The baseline core was extracted from
+`9948248`; measurements ran after compilation completed. GUI, disk I/O, and editor
+fixture construction are excluded. Run the current benchmark with:
+
+```sh
+cargo bench --no-default-features --locked --bench engine
+```
+
+| Workload | Before calculate median | After calculate median / p95 | Before edit median | After edit median / p95 |
+| --- | ---: | ---: | ---: | ---: |
+| 20 arithmetic rows | 0.012 ms | 0.011 / 0.017 ms | 0.012 ms | 0.011 / 0.017 ms |
+| 500 arithmetic rows | 0.273 ms | 0.264 / 0.296 ms | 0.278 ms | 0.267 / 0.291 ms |
+| 500 rows / 950 KB notes | 0.437 ms | 0.427 / 0.454 ms | 0.791 ms | 0.745 / 0.788 ms |
+| 500 scientific rows, repeated argument | 16.218 ms | 0.382 / 0.393 ms | 16.179 ms | 0.382 / 0.395 ms |
+| 500 scientific rows, distinct arguments | 19.824 ms | 0.876 / 0.933 ms | 19.852 ms | 0.819 / 0.966 ms |
+
+The table measures warm caches. With an empty function cache, the updated repeated
+argument workload takes 0.687 ms median; 500 distinct arguments take **20.564 ms**
+(27.594 ms p95), versus 20.941 ms median before. A new scientific document can
+still exceed a 16.7 ms frame budget; cached recalculation is the large improvement.
+Small arithmetic/note differences are within normal local timing variation.
+
+The normal release executable, without E2E probes, was also measured in Xvfb at
+1280×1024. After two seconds to settle, process CPU time was sampled for three
+seconds. The updated process accumulated no CPU ticks during these samples;
+this means below the sampling resolution, not literally zero work forever.
+
+| Visible tape | Before idle CPU, one core | After sampled idle CPU | Before / after RSS |
+| --- | ---: | ---: | ---: |
+| Short tape | 6.00% | 0.00% | 23,640 / 21,884 KiB |
+| 500 arithmetic rows | 28.00% | 0.00% | 26,840 / 24,008 KiB |
+| 500 note rows | 20.67% | 0.00% | 26,044 / 23,868 KiB |
+
+Visible-window startup samples ranged from 40–150 ms after the changes; this pass
+does not establish a startup improvement. Executable size is essentially unchanged:
+11,286,000 → **11,301,616 bytes** (10.76 → 10.78 MiB).
+
+Validation includes 92 release Rust tests, 17 Python tests, formatting, Clippy,
+ShellCheck, workflow linting, core-only tests, and compilation of the fuzz target.
+The complete X11 desktop suite passed editing/clipboard, update checks, menus,
+themes, compact layout, zoom, tabs, crash recovery, and last-tab close protection.
+PDF syntax/streams, font embedding, XLSX ZIP/XML, and native-document exports were
+checked. The dependency audit uses a current local advisory database; the local
+offline run excludes registry yanked checks, while CI enables them. See
+[quality and platform acceptance](QUALITY.md) and [security limits](../SECURITY.md).
+
+## Historical September 2026 measurements
+
 Measured on Linux x86_64 with rustc 1.98.1 on 2026-09-10. These results describe this machine and compiler; they are not promises for other platforms. The baseline was the existing stripped `target/release/numpad` (18,375,424 bytes / 17.52 MiB).
 
 ## Changes

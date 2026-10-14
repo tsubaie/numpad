@@ -1,5 +1,6 @@
 use crate::{
     engine::{self, Format, Kind},
+    limits,
     math::Number,
 };
 use directories::ProjectDirs;
@@ -7,7 +8,7 @@ use num_traits::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -186,8 +187,21 @@ pub fn session_path() -> PathBuf {
 }
 static NEXT_WRITE: AtomicU64 = AtomicU64::new(0);
 
+/// Keep rejected recovery data without reading or expanding it into memory.
+pub fn preserve_recovery(path: &Path) -> Result<PathBuf, String> {
+    let backup = path.with_file_name(format!(
+        "workspace.recovery-{}-{}.json",
+        std::process::id(),
+        NEXT_WRITE.fetch_add(1, Ordering::Relaxed)
+    ));
+    // create_new semantics for the backup: never replace an earlier recovery.
+    fs::hard_link(path, &backup).map_err(|e| format!("Cannot preserve recovery data: {e}"))?;
+    // Atomic saves later replace the original inode; this link retains its bytes.
+    Ok(backup)
+}
+
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(|e| format!("Cannot create folder: {e}"))?;
     }
     let temporary = path.with_file_name(format!(
@@ -196,45 +210,124 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         std::process::id(),
         NEXT_WRITE.fetch_add(1, Ordering::Relaxed)
     ));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
         .open(&temporary)
         .map_err(|e| format!("Cannot save file: {e}"))?;
-    file.write_all(bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|e| format!("Cannot write file: {e}"))?;
-    drop(file);
-    fs::rename(&temporary, path).map_err(|e| format!("Cannot finish saving file: {e}"))
+    let result = (|| {
+        file.write_all(bytes)
+            .map_err(|e| format!("Cannot write file: {e}"))?;
+        // A replacement must not broaden an existing document's permissions.
+        // Apply them only after writing, while the staging file remains private.
+        if let Ok(metadata) = fs::metadata(path) {
+            file.set_permissions(metadata.permissions())
+                .map_err(|e| format!("Cannot preserve file permissions: {e}"))?;
+        }
+        file.sync_all()
+            .map_err(|e| format!("Cannot sync file: {e}"))?;
+        drop(file);
+        fs::rename(&temporary, path).map_err(|e| format!("Cannot finish saving file: {e}"))?;
+        #[cfg(unix)]
+        {
+            let parent = path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            fs::File::open(parent)
+                .and_then(|dir| dir.sync_all())
+                .map_err(|e| format!("File replaced, but folder sync failed: {e}"))?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// Read at most limit + 1 bytes, including when a file grows during the read.
+pub fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, String> {
+    let file = fs::File::open(path).map_err(|e| format!("Cannot open file: {e}"))?;
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file() || metadata.len() > limit as u64 {
+        return Err(format!(
+            "File is not a regular file within the {limit}-byte limit"
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Cannot read file: {e}"))?;
+    if bytes.len() > limit {
+        return Err(format!("File exceeds the {limit}-byte limit"));
+    }
+    Ok(bytes)
+}
+
+impl Document {
+    pub fn validate(&mut self) -> Result<(), String> {
+        if !matches!(self.version, 1 | 2) {
+            return Err(format!("Unsupported document version {}", self.version));
+        }
+        limits::text(&self.text)?;
+        if !self.preferences.zoom.is_finite() {
+            return Err("Invalid document zoom".into());
+        }
+        self.preferences.zoom = self.preferences.zoom.clamp(0.6, 2.0);
+        self.preferences.format.digits = self.preferences.format.digits.min(12);
+        if !self.memory.is_empty() {
+            engine::number(&self.memory, &Format::default())
+                .map_err(|e| format!("Invalid memory: {e}"))?;
+        }
+        let tax = self.preferences.tax_settings();
+        if tax.label.chars().count() > 16 {
+            return Err("Tax name exceeds 16 characters".into());
+        }
+        tax.validate()
+            .map_err(|e| format!("Invalid tax settings: {e}"))?;
+        self.preferences.tax = Some(tax);
+        Ok(())
+    }
 }
 pub fn save(path: &Path, doc: &Document) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(doc).map_err(|e| e.to_string())?;
+    let mut doc = doc.clone();
+    doc.validate()?;
+    let bytes = serde_json::to_vec_pretty(&doc).map_err(|e| e.to_string())?;
     atomic_write(path, &bytes)
 }
 pub fn load(path: &Path) -> Result<Document, String> {
-    let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
-    if metadata.len() > 2_000_000 {
-        return Err("File exceeds the 2 MB document limit".into());
-    }
-    let text = fs::read_to_string(path).map_err(|e| format!("Cannot read file: {e}"))?;
-    if path
+    let plain = path
         .extension()
-        .is_some_and(|s| s.eq_ignore_ascii_case("txt"))
-    {
-        return Ok(Document::new(text, Preferences::default(), "0".into()));
-    }
-    let mut doc: Document =
-        serde_json::from_str(&text).map_err(|e| format!("Not a valid NumPad document: {e}"))?;
-    if !matches!(doc.version, 1 | 2) {
-        return Err(format!("Unsupported document version {}", doc.version));
-    }
-    if doc.text.len() > 1_000_000 {
-        return Err("Document exceeds the text limit".into());
-    }
-    doc.preferences.zoom = doc.preferences.zoom.clamp(0.6, 2.0);
-    doc.preferences.format.digits = doc.preferences.format.digits.min(12);
+        .is_some_and(|s| s.eq_ignore_ascii_case("txt"));
+    let bytes = read_bounded(
+        path,
+        if plain {
+            limits::TEXT_BYTES
+        } else {
+            limits::DOCUMENT_BYTES
+        },
+    )?;
+    let mut doc = if plain {
+        let text = String::from_utf8(bytes).map_err(|e| format!("Text must be UTF-8: {e}"))?;
+        Document::new(
+            text.replace("\r\n", "\n").replace('\r', "\n"),
+            Preferences::default(),
+            "0".into(),
+        )
+    } else {
+        serde_json::from_slice::<Document>(&bytes)
+            .map_err(|e| format!("Not a valid NumPad document: {e}"))?
+    };
+    doc.validate()?;
     Ok(doc)
 }
+
 pub fn text_export(text: &str, f: &Format) -> String {
     engine::calculate(text, f)
         .lines
@@ -354,13 +447,23 @@ pub fn export_pdf(path: &Path, text: &str, f: &Format) -> Result<(), String> {
         "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
         "/System/Library/Fonts/Supplemental/Courier New.ttf",
     ];
-    let font = font_paths
-        .iter()
-        .filter_map(|p| fs::read(p).ok())
-        .find(|bytes| ttf_parser::Face::parse(bytes, 0).is_ok());
-    let bytes = crate::pdf_export::render(&text_export(text, f), font.as_deref())?;
-    atomic_write(path, &bytes)
+    let text = text_export(text, f);
+    let mut last_error = None;
+    for font_path in font_paths {
+        let Ok(font) = read_bounded(Path::new(font_path), 20 * 1024 * 1024) else {
+            continue;
+        };
+        match crate::pdf_export::render(&text, Some(&font)) {
+            Ok(bytes) => return atomic_write(path, &bytes),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    match crate::pdf_export::render(&text, None) {
+        Ok(bytes) => atomic_write(path, &bytes),
+        Err(error) => Err(last_error.unwrap_or(error)),
+    }
 }
+
 pub fn memory_value(text: &str) -> Number {
     engine::number(text, &Format::default()).unwrap_or_default()
 }

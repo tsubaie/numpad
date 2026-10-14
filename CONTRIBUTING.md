@@ -70,4 +70,4 @@ For AI-assisted pull requests, include a short summary of the assistance used, t
 - For bug fixes, include the smallest input that reproduces the failure and assert the corrected result. Cover relevant errors and boundaries, not only the happy path; do not weaken existing tests to make a change pass.
 - Update user-facing documentation when behavior or shortcuts change. Screenshots must show the real app with non-private demo data. Report desktop testing separately from compilation and unit-test results.
 
-See [the architecture overview](docs/ARCHITECTURE.md) for more context. Contributions are made under the project's [MIT License](LICENSE).
+See [the architecture overview](docs/ARCHITECTURE.md), [quality checks and platform acceptance](docs/QUALITY.md), and [dependency and release security](SECURITY.md) for more context. Contributions are made under the project's [MIT License](LICENSE).

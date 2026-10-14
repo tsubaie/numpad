@@ -144,7 +144,7 @@ Prefer a per-user Linux install or a specific version?
 
 ~~~sh
 curl -fsSL https://raw.githubusercontent.com/tsubaie/numpad/main/install.sh | NUMPAD_INSTALL=tarball sh
-curl -fsSL https://raw.githubusercontent.com/tsubaie/numpad/main/install.sh | NUMPAD_VERSION=1.4.0 sh
+curl -fsSL https://raw.githubusercontent.com/tsubaie/numpad/main/install.sh | NUMPAD_VERSION=1.4.1 sh
 ~~~
 
 ### Download a package
@@ -175,7 +175,7 @@ Open **Menu → Settings → About → Check for updates**. NumPad checks GitHub
 
 ### Build from source
 
-Install stable Rust with edition 2024 support. Windows needs the Visual Studio C++ Build Tools and Windows SDK (MSVC toolchain); macOS needs Xcode Command Line Tools.
+Install Rust using rustup; `rust-toolchain.toml` selects the tested toolchain. Windows needs the Visual Studio C++ Build Tools and Windows SDK (MSVC toolchain); macOS needs Xcode Command Line Tools.
 
 On Debian or Ubuntu, install the build dependencies:
 
@@ -197,7 +197,7 @@ The executable is **target/release/numpad.exe** on Windows, or **target/release/
 
 ## Builds and releases
 
-[GitHub Actions](https://github.com/tsubaie/numpad/actions/workflows/build.yml) runs formatting, Clippy, unit tests, real Linux UI tests, native builds, and packaging. Linux packages are installed in Debian, Fedora, and Arch containers for headless export checks. Releases require both native builds and the UI job to pass; other desktops still need manual interaction testing.
+[GitHub Actions](https://github.com/tsubaie/numpad/actions/workflows/build.yml) runs formatting, Clippy, unit tests, real Linux UI tests, dependency auditing, native builds, and packaging. Linux packages are installed in Debian, Fedora, and Arch containers for headless export checks. Releases require native builds, UI tests, and the security job to pass; other desktops still need manual interaction testing.
 
 - Rust dependencies and build outputs are cached per platform/toolchain; the packaging tool has its own cache.
 - Documentation-only changes skip native builds, and newer branch commits cancel superseded runs.
@@ -212,10 +212,14 @@ Your session is automatically saved in the operating system's local application-
 
 A few details worth knowing:
 
-- Display rounding is separate from internal decimal arithmetic.
-- Undo and redo share an 8 MiB history budget per tab, with up to 300 steps. Large tapes may retain fewer steps; rejected edits do not consume history.
+- Display rounding is separate from internal decimal arithmetic; operand text keeps its precision.
+- Double-click selects a word; triple-click selects a line. Comments appear in green italics, and subtotals have a distinct accent and underline. Spaces and comments after a subtotal remain editable.
+- Narrow windows place the calculator controls below the full-width tape, with independent scrolling. Tape text stays inside its viewport when windows are resized or tiled.
+- Decimal input exponents and normalized scales are bounded to −512 through 512, separately from the 32-integer-digit magnitude limit. Out-of-range values report an error before expansion.
+- Typed, imported and recovered tapes share a 1 MB/500-row limit. Workspaces support up to 64 tabs and 8 MB of text.
+- Undo and redo share an 8 MiB history budget per tab, with up to 300 steps. Open tabs additionally share a 32 MiB history budget. Large tapes may retain fewer steps; rejected edits do not consume history.
 - Excel exports contain values, not executable formulas. Numbers exceeding Excel's 15-digit precision are preserved as text.
-- Unicode PDF export requires an available supported font, such as Consolas, DejaVu Sans Mono, or Courier New. Complex-script shaping is not certified.
+- Unicode PDF export tries available supported fonts and requires a suitable font, such as Consolas, DejaVu Sans Mono, or Courier New. Complex-script shaping is not certified.
 - Current saves use document format version 2. Version 1 documents still open, but recalculate using the current top-to-bottom tape rules.
 - Autosave helps recover a session; explicitly saved documents are still the best way to keep separate projects.
 
@@ -253,12 +257,12 @@ cargo clippy --all-targets --locked -- -D warnings
 The UI suite launches NumPad in isolated processes and drives the actual application
 with X11 mouse and keyboard events, including forced-restart recovery checks.
 
-Install `Xvfb`, `xvfb-run`, `xdotool`, and system fonts (Ubuntu packages:
-`xvfb xdotool fonts-dejavu-core`), then run:
+Install `Xvfb`, `xvfb-run`, `xdotool`, ImageMagick (`import`), and system fonts (Ubuntu packages:
+`xvfb xdotool imagemagick fonts-dejavu-core`), then run:
 
 ```sh
 cargo test --locked --bin numpad
-xvfb-run -a -s '-screen 0 1280x1024x24' cargo test --locked --features e2e --test e2e
+xvfb-run -a -s '-screen 0 1280x1200x24' cargo test --release --locked --features e2e --test e2e
 ```
 
 Coverage includes connected-tab geometry and seam colors, editing, undo/redo,
@@ -290,3 +294,5 @@ cargo clippy --all-targets --locked -- -D warnings
 Created by [@tsubaie](https://github.com/tsubaie). Have a bug or an idea? [Open an issue](https://github.com/tsubaie/numpad/issues).
 
 NumPad is available under the [MIT License](LICENSE). Third-party dependencies retain their respective licenses.
+
+See [quality and platform verification](docs/QUALITY.md) and [security maintenance](SECURITY.md) for regression checks, fuzzing, dependency advisories and remaining platform requirements.

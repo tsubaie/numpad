@@ -151,6 +151,40 @@ impl App {
     fn click(&mut self, name: &str) {
         self.click_target(name, true);
     }
+    fn click_text(&mut self, line: usize, column: f64, count: usize) {
+        self.settle();
+        let s = self.state();
+        let viewport = s["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "tape-viewport")
+            .unwrap();
+        let zoom = s["zoom"].as_f64().unwrap();
+        let px = viewport["x"].as_f64().unwrap() + 12. + column * 9.6 * zoom;
+        let py = viewport["y"].as_f64().unwrap() + 12. + (line as f64 + 0.5) * 28. * zoom;
+        x(&[
+            "mousemove",
+            "--window",
+            &self.window,
+            &format!("{px:.0}"),
+            &format!("{py:.0}"),
+        ]);
+        // Give each press a real duration so the native event loop observes
+        // distinct clicks even while software rendering a frame.
+        for _ in 0..count {
+            x(&[
+                "mousedown",
+                "1",
+                "sleep",
+                "0.04",
+                "mouseup",
+                "1",
+                "sleep",
+                "0.12",
+            ]);
+        }
+    }
     fn settle(&mut self) {
         // A queued probe may still describe the previous widget tree. Require
         // two subsequent observations before using geometry or sending input.
@@ -264,7 +298,62 @@ fn main() {
 
     app.key("ctrl+t");
     app.wait("new tab", |s| s["tabs"] == 2);
-    app.type_text("x = 10+2*3");
+    app.type_text("alpha bravo charlie");
+    app.click_text(0, 8.5, 2);
+    app.wait("double click selects a word", |s| s["selection"] == "bravo");
+    app.key("ctrl+c");
+    app.type_text("delta");
+    app.wait("typing replaces the selected word", |s| {
+        s["text"] == "alpha delta charlie"
+    });
+    app.key("ctrl+End");
+    app.key("ctrl+v");
+    app.wait("word selection copied to clipboard", |s| {
+        s["text"] == "alpha delta charliebravo"
+    });
+    app.click_text(0, 8.5, 3);
+    app.wait("triple click selects the line", |s| {
+        s["selection"] == "alpha delta charliebravo"
+    });
+    app.key("BackSpace");
+    app.wait("delete selected line", |s| s["text"] == "");
+    app.type_text("1+2");
+    app.key("Return");
+    app.key("ctrl+Home");
+    app.key("Down");
+    app.key("Down");
+    app.key("Down");
+    app.key("End");
+    let at_total = app.wait("caret at subtotal end", |s| {
+        s["caret"]["line"] == 3
+            && s["text"]
+                .as_str()
+                .and_then(|t| t.lines().nth(3))
+                .is_some_and(|line| s["caret"]["column"].as_u64() == Some(line.len() as u64))
+    });
+    let before_space = at_total["caret"]["column"].as_u64().unwrap();
+    app.type_text("   ");
+    app.wait("subtotal spaces immediately move the caret", |s| {
+        s["caret"]["column"].as_u64() == Some(before_space + 3)
+            && s["text"]
+                .as_str()
+                .unwrap_or("")
+                .lines()
+                .nth(3)
+                .is_some_and(|l| l.ends_with("   "))
+    });
+    app.type_text("subtotal note");
+    app.key("Return");
+    app.key("Return");
+    app.type_text("Try selecting these words");
+    app.wait("comments ready for capture", |s| {
+        s["text"]
+            .as_str()
+            .is_some_and(|t| t.contains("subtotal note") && t.contains("Try selecting these words"))
+    });
+    app.capture_documentation("comments-and-subtotal");
+    println!("PASS word/line selection, copy/replace/delete, and immediate subtotal spacing");
+    app.replace("x = 10+2*3");
     app.wait("typing", |s| {
         s["text"].as_str().is_some_and(|t| t.contains("x = 10+2*3"))
     });
@@ -365,15 +454,83 @@ fn main() {
         s["modal"] == false && s["theme"] == "Dark"
     });
     app.capture("dark-tabs");
-    x(&["windowsize", &app.window, "700", "580"]);
-    app.wait("compact layout", |s| {
-        s["targets"]
-            .as_array()
+    let original = app.state()["text"].as_str().unwrap().to_owned();
+    app.click("tape-surface");
+    let long_note = "Long comment stays inside the tape. ".repeat(5);
+    app.replace(&long_note);
+    app.wait("long note", |s| s["text"] == long_note);
+    for (width, height) in [(700, 580), (464, 1112), (420, 580), (900, 1000)] {
+        x(&[
+            "windowsize",
+            &app.window,
+            &width.to_string(),
+            &height.to_string(),
+        ]);
+        app.wait("window resize delivered", |s| {
+            s["window"]["width"].as_f64() == Some(width as f64)
+                && s["window"]["height"].as_f64() == Some(height as f64)
+        });
+        app.settle();
+        let state = app.state();
+        let target = |name: &str| {
+            state["targets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap()
+        };
+        let tape = target("tape-surface");
+        let controls = target("calculator-controls");
+        let viewport = target("tape-viewport");
+        if width < 860 {
+            assert!(
+                (tape["width"].as_f64().unwrap() - (width as f64 - 32.)).abs() < 1.,
+                "narrow tape must use the full body width"
+            );
+            assert!(
+                controls["y"].as_f64().unwrap()
+                    >= tape["y"].as_f64().unwrap() + tape["height"].as_f64().unwrap(),
+                "controls must sit below the tape"
+            );
+        } else {
+            assert!(
+                controls["x"].as_f64().unwrap()
+                    >= tape["x"].as_f64().unwrap() + tape["width"].as_f64().unwrap(),
+                "wide controls must sit beside the tape"
+            );
+        }
+        assert!(
+            viewport["height"].as_f64().unwrap() >= 100.,
+            "tape must remain usable"
+        );
+        let label = format!("layout-{width}-{height}");
+        app.capture_documentation(&label);
+        let screen = image::open(app.dir.join(format!("{label}.png")))
             .unwrap()
-            .iter()
-            .any(|t| t["name"] == "tape-surface" && t["width"].as_f64().unwrap() < 400.)
-    });
-    app.capture("compact-tabs");
+            .into_rgb8();
+        let mut green_pixels = 0;
+        for (x, y, pixel) in screen.enumerate_pixels() {
+            let [r, g, b] = pixel.0;
+            if g > 150 && g > r.saturating_add(30) && g > b.saturating_add(30) {
+                green_pixels += 1;
+                assert!(
+                    x as f64 >= viewport["x"].as_f64().unwrap()
+                        && (x as f64)
+                            < viewport["x"].as_f64().unwrap() + viewport["width"].as_f64().unwrap()
+                        && y as f64 >= viewport["y"].as_f64().unwrap()
+                        && (y as f64)
+                            < viewport["y"].as_f64().unwrap()
+                                + viewport["height"].as_f64().unwrap(),
+                    "comment escaped tape at {x},{y} in {label}"
+                );
+            }
+        }
+        assert!(green_pixels > 100, "comment must be visibly rendered");
+    }
+    app.click("tape-surface");
+    app.replace(&original);
+    app.wait("restore tape after layout check", |s| s["text"] == original);
     x(&["windowsize", &app.window, "1180", "820"]);
     app.wait("restore layout", |s| {
         s["targets"]
@@ -382,7 +539,7 @@ fn main() {
             .iter()
             .any(|t| t["name"] == "tape-surface" && t["width"].as_f64().unwrap() > 700.)
     });
-    println!("PASS theme save/cancel and compact layout");
+    println!("PASS themes, narrow/tall/short layouts, and rendered text clipping");
 
     app.click("tape-surface");
     app.key("ctrl+plus");

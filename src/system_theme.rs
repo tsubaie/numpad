@@ -66,6 +66,33 @@ pub fn omarchy_colors() -> Option<Colors> {
     ThemeWatcher::new().poll()
 }
 
+/// Poll filesystem metadata off the UI update path and publish actual changes.
+/// An unchanged system palette must not redraw the application every tick.
+pub fn changes() -> impl iced::futures::Stream<Item = Option<Colors>> {
+    use iced::futures::SinkExt;
+    iced::stream::channel(
+        1,
+        async |mut output: iced::futures::channel::mpsc::Sender<Option<Colors>>| {
+            let mut watcher = ThemeWatcher::new();
+            let mut previous = watcher.poll();
+            if output.send(previous).await.is_err() {
+                return;
+            }
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(900));
+            loop {
+                interval.tick().await;
+                let next = watcher.poll();
+                if next != previous {
+                    if output.send(next).await.is_err() {
+                        return;
+                    }
+                    previous = next;
+                }
+            }
+        },
+    )
+}
+
 fn blend(a: Color, b: Color, weight: f32) -> Color {
     Color::from_rgb(
         a.r + (b.r - a.r) * weight,

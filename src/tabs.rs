@@ -39,7 +39,38 @@ struct SavedTab {
 struct Workspace {
     version: u32,
     active: usize,
+    #[serde(deserialize_with = "bounded_tabs")]
     tabs: Vec<SavedTab>,
+}
+
+fn bounded_tabs<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<SavedTab>, D::Error> {
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Vec<SavedTab>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "at most {} tabs", limits::TABS)
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut tabs = Vec::new();
+            let mut bytes = 0usize;
+            while let Some(tab) = sequence.next_element::<SavedTab>()? {
+                bytes = bytes.saturating_add(tab.document.text.len());
+                if tabs.len() >= limits::TABS || bytes > limits::WORKSPACE_TEXT_BYTES {
+                    return Err(serde::de::Error::custom(
+                        "Workspace exceeds tab or text limits",
+                    ));
+                }
+                tabs.push(tab);
+            }
+            Ok(tabs)
+        }
+    }
+    deserializer.deserialize_seq(Visitor)
 }
 
 impl TapeState {
@@ -73,6 +104,30 @@ impl TapeState {
 }
 
 impl App {
+    pub(super) fn budget_text(&mut self) {
+        let inactive = self
+            .tabs
+            .iter()
+            .filter_map(|t| t.state.as_ref())
+            .map(|s| s.editor.text.len())
+            .sum::<usize>();
+        self.editor
+            .set_text_limit(limits::WORKSPACE_TEXT_BYTES.saturating_sub(inactive));
+    }
+    pub(super) fn budget_history(&mut self) {
+        let share = limits::WORKSPACE_HISTORY_BYTES / self.tabs.len().max(1);
+        self.editor.set_history_limit(share);
+        for state in self.tabs.iter_mut().filter_map(|tab| tab.state.as_mut()) {
+            state.editor.set_history_limit(share);
+        }
+    }
+    pub(super) fn tab_file(&self, id: u64) -> Option<PathBuf> {
+        self.tabs
+            .iter()
+            .find(|t| t.id == id)
+            .and_then(|t| t.state.as_ref())
+            .and_then(|s| s.file.clone())
+    }
     pub(super) fn tab_id(&self) -> u64 {
         self.tabs[self.active_tab].id
     }
@@ -125,13 +180,34 @@ impl App {
     }
 
     pub(super) fn add_tab(&mut self, document: Document, file: Option<PathBuf>, modified: bool) {
+        if self.tabs.len() >= limits::TABS {
+            self.notify(
+                "Workspace tab limit reached. Save and close a tab before opening another.",
+            );
+            return;
+        }
+        let total_bytes = self.editor.text.len()
+            + self
+                .tabs
+                .iter()
+                .filter_map(|t| t.state.as_ref())
+                .map(|s| s.editor.text.len())
+                .sum::<usize>();
+        let state = TapeState::new(document, file, modified);
+        if total_bytes + state.editor.text.len() > limits::WORKSPACE_TEXT_BYTES {
+            self.notify(
+                "Workspace text limit reached. Save and close a tab before opening another.",
+            );
+            return;
+        }
         let id = self.next_tab_id;
         self.next_tab_id += 1;
         self.tabs.push(Tab {
             id,
-            state: Some(TapeState::new(document, file, modified)),
+            state: Some(state),
         });
         self.switch_tab(id);
+        self.budget_history();
         self.dirty_workspace();
     }
 
@@ -189,6 +265,7 @@ impl App {
             self.switch_tab(self.tabs[next].id);
         }
         self.tabs.remove(index);
+        self.budget_history();
         if index < self.active_tab {
             self.active_tab -= 1;
         }
@@ -224,7 +301,7 @@ impl App {
             false
         };
         self.dirty_workspace();
-        if self.pending_close == Some(id) {
+        if self.pending_close == Some(id) && !self.saves.queued_for(id) {
             self.pending_close = None;
             if unchanged {
                 return self.discard_tab(id);
@@ -274,7 +351,17 @@ impl App {
     }
 
     pub(super) fn start_workspace_save(&mut self) -> Task<Message> {
-        if self.autosave_pending || (!self.dirty && self.exit_request.is_none()) {
+        if self.recovery_protected {
+            if self.exit_request.is_some() {
+                self.notify("Recovery data could not be backed up. Save your tapes as documents; the original workspace will not be overwritten.");
+            }
+            self.exit_request = None;
+            return Task::none();
+        }
+        if self.autosave_pending
+            || (self.exit_request.is_some() && self.saves.pending())
+            || (!self.dirty && self.exit_request.is_none())
+        {
             return Task::none();
         }
         let closing = self.exit_request.is_some();
@@ -370,28 +457,45 @@ impl App {
         if !path.exists() {
             return Ok(());
         }
-        let workspace: Workspace =
-            serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string())?;
-        self.restore_tabs(workspace)
+        let restored = (|| {
+            let workspace: Workspace =
+                serde_json::from_slice(&storage::read_bounded(&path, limits::WORKSPACE_BYTES)?)
+                    .map_err(|e| e.to_string())?;
+            self.restore_tabs(workspace)
+        })();
+        if let Err(error) = restored {
+            return match storage::preserve_recovery(&path) {
+                Ok(backup) => Err(format!(
+                    "{error}. Original session preserved at {}",
+                    backup.display()
+                )),
+                Err(backup_error) => {
+                    self.recovery_protected = true;
+                    Err(format!("{error}. {backup_error}"))
+                }
+            };
+        }
+        Ok(())
     }
 
     fn restore_tabs(&mut self, mut workspace: Workspace) -> Result<(), String> {
         if workspace.version != 1
             || workspace.tabs.is_empty()
+            || workspace.tabs.len() > limits::TABS
+            || workspace
+                .tabs
+                .iter()
+                .map(|t| t.document.text.len())
+                .sum::<usize>()
+                > limits::WORKSPACE_TEXT_BYTES
             || workspace.active >= workspace.tabs.len()
         {
             return Err("Invalid workspace session".into());
         }
         for tab in &mut workspace.tabs {
-            if !matches!(tab.document.version, 1 | 2) || tab.document.text.len() > 1_000_000 {
-                return Err("Invalid document in workspace session".into());
-            }
-            let document = Arc::make_mut(&mut tab.document);
-            document.preferences.zoom = document.preferences.zoom.clamp(0.6, 2.0);
-            document.preferences.format.digits = document.preferences.format.digits.min(12);
+            Arc::make_mut(&mut tab.document).validate()?;
         }
-        self.tabs = workspace
+        let tabs: Vec<Tab> = workspace
             .tabs
             .into_iter()
             .enumerate()
@@ -404,6 +508,17 @@ impl App {
                 )),
             })
             .collect();
+        // Recomputed total rows can be longer than their imported text.
+        if tabs
+            .iter()
+            .filter_map(|t| t.state.as_ref())
+            .map(|s| s.editor.text.len())
+            .sum::<usize>()
+            > limits::WORKSPACE_TEXT_BYTES
+        {
+            return Err("Recalculated workspace exceeds the text limit".into());
+        }
+        self.tabs = tabs;
         self.next_tab_id = self.tabs.len() as u64;
         self.active_tab = workspace.active;
         let state = self.tabs[self.active_tab]
@@ -411,6 +526,7 @@ impl App {
             .take()
             .expect("restored tab has state");
         self.install_tape(state);
+        self.budget_history();
         Ok(())
     }
 
@@ -530,6 +646,56 @@ impl App {
 mod tests {
     use super::*;
     use crate::dialogs::tests::app;
+
+    #[test]
+    fn workspace_rejects_excess_tabs_and_invalid_embedded_documents() {
+        let tab = serde_json::json!({"document": {"version": 2, "text": "1", "memory": "0"}, "file": null, "modified": false});
+        let excessive = serde_json::json!({"version": 1, "active": 0, "tabs": vec![tab.clone(); limits::TABS + 1]});
+        assert!(serde_json::from_value::<Workspace>(excessive).is_err());
+        let mut invalid = serde_json::json!({"version": 1, "active": 0, "tabs": [tab]});
+        invalid["tabs"][0]["document"]["memory"] = "1e-9223372036854775807".into();
+        let mut app = app();
+        let before = app.editor.text.clone();
+        assert!(
+            app.restore_tabs(serde_json::from_value(invalid).unwrap())
+                .is_err()
+        );
+        assert_eq!(app.editor.text, before);
+    }
+
+    #[test]
+    fn recovery_counts_expansion_of_generated_totals_before_installing_tabs() {
+        let source = format!("{}\n=", "x".repeat(990_000));
+        let remaining = limits::WORKSPACE_TEXT_BYTES - source.len() * 8;
+        let document = Arc::new(Document::new(source, Preferences::default(), "0".into()));
+        let mut tabs: Vec<_> = (0..8)
+            .map(|_| SavedTab {
+                document: Arc::clone(&document),
+                file: None,
+                modified: false,
+            })
+            .collect();
+        tabs.push(SavedTab {
+            document: Arc::new(Document::new(
+                "x".repeat(remaining),
+                Preferences::default(),
+                "0".into(),
+            )),
+            file: None,
+            modified: false,
+        });
+        let mut app = app();
+        assert!(
+            app.restore_tabs(Workspace {
+                version: 1,
+                active: 0,
+                tabs
+            })
+            .is_err()
+        );
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.editor.text, "1.5");
+    }
 
     #[test]
     fn inactive_snapshots_are_shared_and_keep_in_flight_preferences() {

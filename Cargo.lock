@@ -1781,7 +1781,7 @@ dependencies = [
 
 [[package]]
 name = "numpad"
-version = "1.4.0"
+version = "1.4.1"
 dependencies = [
  "bigdecimal",
  "directories",
@@ -1796,9 +1796,10 @@ dependencies = [
  "rust_xlsxwriter",
  "serde",
  "serde_json",
+ "skrifa 0.44.0",
  "subsetter",
  "tokio",
- "ttf-parser",
+ "unicode-segmentation",
 ]
 
 [[package]]

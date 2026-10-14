@@ -1,13 +1,21 @@
 [package]
 name = "numpad"
-version = "1.4.0"
+version = "1.4.1"
 edition = "2024"
+rust-version = "1.88"
 description = "A native calculation tape with comments and live totals"
 license = "MIT"
 
 [features]
+default = ["desktop"]
+desktop = ["dep:iced", "dep:image", "dep:rfd", "dep:tokio", "dep:unicode-segmentation"]
 # Read-only UI probes; never enabled in distributed builds.
-e2e = []
+e2e = ["desktop"]
+
+[[bin]]
+name = "numpad"
+path = "src/main.rs"
+required-features = ["desktop"]
 
 [[test]]
 name = "e2e"
@@ -15,20 +23,21 @@ harness = false
 required-features = ["e2e"]
 
 [dependencies]
-iced = { version = "0.14", default-features = false, features = ["advanced", "canvas", "tokio", "tiny-skia", "x11", "wayland", "advanced-shaping", "image-without-codecs"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+iced = { optional = true, version = "0.14", default-features = false, features = ["advanced", "canvas", "tokio", "tiny-skia", "x11", "wayland", "advanced-shaping", "image-without-codecs"] }
+image = { optional = true, version = "0.25", default-features = false, features = ["png"] }
 bigdecimal = { version = "0.4", features = ["serde"] }
 num-traits = "0.2"
 num-bigint = "0.4"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
-rfd = { version = "0.16", default-features = false, features = ["xdg-portal", "wayland", "tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+rfd = { optional = true, version = "0.16", default-features = false, features = ["xdg-portal", "wayland", "tokio"] }
+tokio = { optional = true, version = "1", features = ["rt-multi-thread"] }
+unicode-segmentation = { optional = true, version = "1.13" }
 directories = "6"
 rust_xlsxwriter = "0.94"
 pdf-writer = "0.12"
 subsetter = { version = "0.2", default-features = false }
-ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+skrifa = "0.44"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [build-dependencies]

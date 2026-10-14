@@ -193,7 +193,7 @@ fn read_operand<'a>(s: &'a str, f: &Format) -> (char, String, &'a str) {
     (op, body[..end].into(), &body[end..])
 }
 pub fn number(s: &str, f: &Format) -> Result<D, String> {
-    if s.len() > 128 {
+    if s.len() > math::MAX_SCALE as usize + 64 {
         return Err("Number is too long".into());
     }
     let normalized = if f.comma {
@@ -201,6 +201,14 @@ pub fn number(s: &str, f: &Format) -> Result<D, String> {
     } else {
         s.replace(',', "")
     };
+    if let Some((_, exponent)) = normalized.split_once(['e', 'E']) {
+        let exponent = exponent
+            .parse::<i64>()
+            .map_err(|_| "Invalid decimal exponent")?;
+        if !(-math::MAX_SCALE..=math::MAX_SCALE).contains(&exponent) {
+            return Err("Decimal exponent is outside the supported range (-512 to 512)".into());
+        }
+    }
     D::from_str(&normalized)
         .map_err(|_| "Invalid number".into())
         .and_then(math::checked)
@@ -364,11 +372,18 @@ pub fn calculate(text: &str, f: &Format) -> Tape {
     }
 }
 pub fn format(v: &D, f: &Format) -> String {
+    format_digits(v, f.comma, f.digits.min(12) as i64)
+}
+
+/// Lossless operand text, distinct from rounded result display.
+pub fn format_operand(v: &D, f: &Format) -> String {
+    let precision = v.normalized().fractional_digit_count().max(0);
+    format_digits(v, f.comma, precision.max(i64::from(f.digits.min(12))))
+}
+
+fn format_digits(v: &D, comma: bool, fractional_digits: i64) -> String {
     let s = v
-        .with_scale_round(
-            i64::from(f.digits.min(12)),
-            bigdecimal::RoundingMode::HalfUp,
-        )
+        .with_scale_round(fractional_digits, bigdecimal::RoundingMode::HalfUp)
         .to_plain_string();
     let (integer, fraction) = s.split_once('.').unwrap_or((&s, ""));
     let negative = integer.starts_with('-');
@@ -377,38 +392,50 @@ pub fn format(v: &D, f: &Format) -> String {
     for (i, c) in digits.chars().enumerate() {
         let remaining = digits.len() - i;
         if i > 0 && remaining % 3 == 0 {
-            out.push(if f.comma { '.' } else { ',' });
+            out.push(if comma { '.' } else { ',' });
         }
         out.push(c);
     }
     if negative && !v.is_zero() {
         out.insert(0, '-');
     }
-    if f.digits > 0 {
-        out.push(if f.comma { ',' } else { '.' });
+    if fractional_digits > 0 {
+        out.push(if comma { ',' } else { '.' });
         out.push_str(fraction);
     }
     out
 }
+/// The editable suffix of a generated total, independent of decimal locale.
+pub(crate) fn total_suffix(raw: &str) -> &str {
+    let body = raw.trim_start();
+    if body.starts_with('=') {
+        return body;
+    }
+    body.trim_start_matches(['+', '-', '−'])
+        .trim_start()
+        .trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '.' | ','))
+}
+
 pub fn render(l: &Line, f: &Format) -> String {
     match l.kind {
         Kind::Total => {
             let value = l.value.clone().unwrap_or_default();
             let sign = if value.is_negative() { '-' } else { '+' };
-            format!(
-                " {sign} {:>14}{}{}",
-                format(&value.abs(), f),
-                if l.name.is_empty() && !l.raw.contains('=') {
-                    String::new()
-                } else {
-                    format!(" = {}", l.name)
-                },
-                if l.comment.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {}", l.comment)
-                }
-            )
+            // Only the calculated number is generated. Preserve the editable
+            // suffix verbatim, including spaces and an unfinished '= name'.
+            let raw = l.raw.trim_start();
+            let mut suffix = if raw.starts_with('=') {
+                format!(" {raw}")
+            } else {
+                total_suffix(&l.raw).to_owned()
+            };
+            if suffix.starts_with('=') {
+                suffix.insert(0, ' ');
+            }
+            if suffix.ends_with('=') {
+                suffix.push(' ');
+            }
+            format!(" {sign} {:>14}{suffix}", format(&value.abs(), f))
         }
         Kind::Rule => " -----------------".into(),
         Kind::Value if l.value.is_some() && l.error.is_none() => {
@@ -416,12 +443,7 @@ pub fn render(l: &Line, f: &Format) -> String {
                 l.operand.clone()
             } else {
                 let value = l.value.as_ref().unwrap();
-                let precision = value.normalized().as_bigint_and_exponent().1.clamp(0, 128) as u8;
-                let operand_format = Format {
-                    digits: f.digits.max(precision),
-                    ..f.clone()
-                };
-                format(value, &operand_format)
+                format_operand(value, f)
             };
             let annotation = if let Some(a) = &l.amount {
                 format!(
@@ -512,9 +534,17 @@ impl Parser<'_> {
             return Err("Value undefined".into());
         };
         if c == '+' || c == '-' {
-            self.pos += 1;
+            let mut negative = false;
+            while let Some(sign) = self.s[self.pos..].chars().next() {
+                if !matches!(sign, '+' | '-') {
+                    break;
+                }
+                negative ^= sign == '-';
+                self.pos += 1;
+                self.space();
+            }
             let v = self.atom()?;
-            return Ok(if c == '-' { -v } else { v });
+            return Ok(if negative { -v } else { v });
         }
         if c == '(' {
             self.pos += 1;

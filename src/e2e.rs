@@ -35,6 +35,8 @@ impl Operation<Vec<Target>> for Probe {
             "menu-toggle",
             "active-tab",
             "tape-surface",
+            "tape-viewport",
+            "calculator-controls",
             "copy-grand",
             "copy-memory",
         ] {
@@ -90,6 +92,9 @@ pub fn snapshot(app: &App, targets: Vec<Target>) {
         "zoom": app.prefs.zoom, "menu": app.menu, "modal": app.modal.is_some(),
         "ctrl": app.modifiers.control(),
         "theme": format!("{:?}", app.prefs.theme_mode), "scroll": app.scroll,
+        "window": { "width": app.width, "height": app.height },
+        "selection": app.content.selection(),
+        "caret": { "line": app.editor.caret.line, "column": app.editor.caret.column },
         "result": app.result().normalized().to_plain_string(),
         "grand": app.editor.tape.grand.normalized().to_plain_string(),
         "targets": targets

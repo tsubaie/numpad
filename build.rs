@@ -6,6 +6,10 @@ use image::{
 use std::{env, fs, path::PathBuf};
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DESKTOP");
+    if env::var_os("CARGO_FEATURE_DESKTOP").is_none() {
+        return;
+    }
     println!("cargo:rerun-if-changed=Logo.png");
     println!("cargo:rerun-if-changed=build.rs");
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());

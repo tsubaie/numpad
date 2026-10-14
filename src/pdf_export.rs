@@ -4,6 +4,11 @@ use pdf_writer::{
     Content, Finish, Name, Pdf, Rect, Ref, Str, TextStr,
     types::{CidFontType, FontFlags, SystemInfo, UnicodeCmap},
 };
+use skrifa::{
+    FontRef, MetadataProvider,
+    instance::{LocationRef, Size as FontSize},
+    raw::TableProvider,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Write,
@@ -32,9 +37,8 @@ fn stream(pdf: &mut Pdf, id: Ref, data: &[u8]) -> Result<(), String> {
 }
 
 fn embed_font(pdf: &mut Pdf, data: &[u8], text: &str) -> Result<BTreeMap<char, u16>, String> {
-    let face =
-        ttf_parser::Face::parse(data, 0).map_err(|e| format!("Cannot parse PDF font: {e:?}"))?;
-    if face.tables().glyf.is_none() {
+    let face = FontRef::new(data).map_err(|e| format!("Cannot parse PDF font: {e:?}"))?;
+    if face.glyf().is_err() {
         return Err("PDF export requires a TrueType outline font.".into());
     }
     let chars: BTreeSet<_> = text.chars().filter(|c| *c != '\n' && *c != '\r').collect();
@@ -46,18 +50,25 @@ fn embed_font(pdf: &mut Pdf, data: &[u8], text: &str) -> Result<BTreeMap<char, u
     let mut glyph_map = vec![0, 0]; // CID 0 is .notdef.
     let mut widths = vec![0.0];
     let mut cmap = UnicodeCmap::new(Name(b"NumPad-Unicode"), CID_INFO);
-    let scale = 1000.0 / f32::from(face.units_per_em());
+    let metrics = face.metrics(FontSize::unscaled(), LocationRef::default());
+    if metrics.units_per_em == 0 {
+        return Err("PDF font has invalid units per em".into());
+    }
+    let scale = 1000.0 / f32::from(metrics.units_per_em);
+    let charmap = face.charmap();
+    let glyph_metrics = face.glyph_metrics(FontSize::unscaled(), LocationRef::default());
     for (i, c) in chars.into_iter().enumerate() {
-        let glyph = face.glyph_index(c).ok_or_else(|| {
+        let glyph = charmap.map(c).ok_or_else(|| {
             format!(
                 "The installed PDF font has no glyph for U+{:04X}. Try text or Excel export.",
                 c as u32
             )
         })?;
         let cid = (i + 1) as u16;
-        let remapped = mapper.remap(glyph.0);
+        let remapped = mapper
+            .remap(u16::try_from(glyph.to_u32()).map_err(|_| "PDF glyph index is too large")?);
         glyph_map.extend(remapped.to_be_bytes());
-        widths.push(f32::from(face.glyph_hor_advance(glyph).unwrap_or(0)) * scale);
+        widths.push(glyph_metrics.advance_width(glyph).unwrap_or(0.0) * scale);
         cmap.pair(cid, c);
         encoding.insert(c, cid);
     }
@@ -81,20 +92,20 @@ fn embed_font(pdf: &mut Pdf, data: &[u8], text: &str) -> Result<BTreeMap<char, u
         .cid_to_gid_map_stream(mapping);
     font.widths().consecutive(0, widths);
     font.finish();
-    let bbox = face.global_bounding_box();
+    let bbox = metrics.bounds.ok_or("PDF font has no bounding box")?;
     pdf.font_descriptor(descriptor)
         .name(FONT_NAME)
         .flags(FontFlags::SYMBOLIC | FontFlags::FIXED_PITCH)
         .bbox(Rect::new(
-            f32::from(bbox.x_min) * scale,
-            f32::from(bbox.y_min) * scale,
-            f32::from(bbox.x_max) * scale,
-            f32::from(bbox.y_max) * scale,
+            bbox.x_min * scale,
+            bbox.y_min * scale,
+            bbox.x_max * scale,
+            bbox.y_max * scale,
         ))
-        .italic_angle(face.italic_angle())
-        .ascent(f32::from(face.ascender()) * scale)
-        .descent(f32::from(face.descender()) * scale)
-        .cap_height(f32::from(face.capital_height().unwrap_or(face.ascender())) * scale)
+        .italic_angle(metrics.italic_angle)
+        .ascent(metrics.ascent * scale)
+        .descent(metrics.descent * scale)
+        .cap_height(metrics.cap_height.unwrap_or(metrics.ascent) * scale)
         .stem_v(80.0)
         .font_file2(font_file);
     let compressed_font = compressed(&subset)?;

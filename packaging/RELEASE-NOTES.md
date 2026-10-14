@@ -1,15 +1,17 @@
-## NumPad 1.4.0
+## NumPad 1.4.1
 
-A native calculation tape for Windows, Linux, and macOS.
+A reliability, performance, and editing update for Windows, Linux, and macOS.
 
-### What's new
+### What's improved
 
-- Check for the latest stable release and install updates from Settings → About. Downloads are verified against release checksums; Windows saves your session before replacing and restarting the app.
-- Faster editing with fewer text allocations, bounded undo memory, and background workspace autosave.
-- Cached theme detection and scientific constants reduce repeated work.
-- Smaller release binaries through a lightweight PDF exporter, font subsetting, simplified icons, and optimized linking. The measured Linux development build shrank from 17.52 MiB to 10.81 MiB (38.3%); sizes vary by platform.
-- A compact, outlined update button, a simpler burger menu, and an author link to www.ta.sa.
-- Expanded editor, updater, recovery, package, and GUI regression checks.
+- Double-click selects a word and triple-click selects a line, including correct copying, replacement, and deletion of the selection.
+- Inline and standalone notes use green italics. Subtotals have an accent background and underline, and spaces and comments after a subtotal respond immediately.
+- Narrow windows put the calculator controls below the full-width tape. Long comments stay within the tape instead of overlapping other controls.
+- Repeated scientific calculations use a bounded cache, long tapes draw only visible paper rows, and unnecessary idle timers stop when there is no work to do.
+- Operand formatting preserves calculation precision. Extreme numeric input and intermediate arithmetic are bounded before expensive expansion.
+- Manual saves run in order, recovery files are preserved before replacement, and document/workspace validation consistently applies memory and input limits. Unix saves use private staging files and preserve existing permission bits.
+- The PDF exporter uses the maintained skrifa font parser. Dependency checks cover the enabled dependency graph, and release packages include GitHub build-provenance attestations.
+- Expanded arithmetic, persistence, Unicode selection, and real desktop regression coverage, including narrow-window pixel checks.
 
 ### Features
 
