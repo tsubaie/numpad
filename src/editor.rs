@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::engine::{self, Format, Kind, Tape};
+use crate::limits;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Pos {
@@ -23,6 +24,8 @@ pub struct Editor {
     undo: VecDeque<Snapshot>,
     redo: VecDeque<Snapshot>,
     history_bytes: usize,
+    history_limit: usize,
+    text_limit: usize,
     pending: Option<Snapshot>,
     batching: bool,
     pub notice: String,
@@ -40,6 +43,8 @@ impl Editor {
             undo: VecDeque::new(),
             redo: VecDeque::new(),
             history_bytes: 0,
+            history_limit: limits::HISTORY_BYTES,
+            text_limit: limits::TEXT_BYTES,
             pending: None,
             batching: false,
             notice: String::new(),
@@ -51,6 +56,25 @@ impl Editor {
     }
     pub fn can_redo(&self) -> bool {
         !self.redo.is_empty()
+    }
+    pub fn set_history_limit(&mut self, bytes: usize) {
+        self.history_limit = bytes.min(limits::HISTORY_BYTES);
+        self.trim_history();
+    }
+    pub fn set_text_limit(&mut self, bytes: usize) {
+        self.text_limit = bytes.min(limits::TEXT_BYTES);
+    }
+    fn trim_history(&mut self) {
+        while self.history_bytes > self.history_limit || self.undo.len() + self.redo.len() > 300 {
+            let removed = if !self.undo.is_empty() {
+                self.undo.pop_front()
+            } else {
+                self.redo.pop_front()
+            };
+            if let Some(snapshot) = removed {
+                self.history_bytes -= snapshot.text.capacity();
+            }
+        }
     }
     fn snapshot(&self) -> Snapshot {
         Snapshot {
@@ -75,16 +99,7 @@ impl Editor {
         }
         // A shared byte budget prevents large documents and multiple tabs from
         // retaining hundreds of full copies. Small tapes still get 300 steps.
-        while self.history_bytes > 8 * 1024 * 1024 || self.undo.len() + self.redo.len() > 300 {
-            let removed = if !self.undo.is_empty() {
-                self.undo.pop_front()
-            } else {
-                self.redo.pop_front()
-            };
-            if let Some(snapshot) = removed {
-                self.history_bytes -= snapshot.text.capacity();
-            }
-        }
+        self.trim_history();
     }
     fn finish_record(&mut self) {
         if self.batching {
@@ -114,6 +129,10 @@ impl Editor {
         self.format = f.clone();
     }
     pub fn undo(&mut self, f: &Format) {
+        if self.undo.back().is_some_and(|s| !self.history_fits(s, f)) {
+            self.notice = "Undo exceeds the document or workspace text limit.".into();
+            return;
+        }
         if let Some(s) = self.undo.pop_back() {
             self.history_bytes -= s.text.capacity();
             self.push_history(self.snapshot(), false);
@@ -121,11 +140,26 @@ impl Editor {
         }
     }
     pub fn redo(&mut self, f: &Format) {
+        if self.redo.back().is_some_and(|s| !self.history_fits(s, f)) {
+            self.notice = "Redo exceeds the document or workspace text limit.".into();
+            return;
+        }
         if let Some(s) = self.redo.pop_back() {
             self.history_bytes -= s.text.capacity();
             self.push_history(self.snapshot(), true);
             self.restore(s, f);
         }
+    }
+
+    fn history_fits(&self, snapshot: &Snapshot, f: &Format) -> bool {
+        let converted;
+        let text = if snapshot.format == *f {
+            &snapshot.text
+        } else {
+            converted = transcode(&snapshot.text, &snapshot.format, f);
+            &converted
+        };
+        text.len() <= self.text_limit && limits::text(text).is_ok()
     }
 
     pub fn clear(&mut self, f: &Format) {
@@ -136,6 +170,14 @@ impl Editor {
         self.recalculate(f, false);
     }
     pub fn load(&mut self, text: String, f: &Format) {
+        if text.len() > self.text_limit {
+            self.notice = "Document or workspace text limit reached.".into();
+            return;
+        }
+        if let Err(error) = limits::text(&text) {
+            self.notice = error;
+            return;
+        }
         self.record();
         self.text = text;
         self.caret = Pos::default();
@@ -185,12 +227,12 @@ impl Editor {
         let new_lines = value.bytes().filter(|b| *b == b'\n').count();
         let removed_lines = self.text[s..e].bytes().filter(|b| *b == b'\n').count();
         let old_lines = self.tape.lines.len();
-        if new_lines > removed_lines && old_lines + new_lines - removed_lines > 500 {
+        if new_lines > removed_lines && old_lines + new_lines - removed_lines > limits::LINES {
             self.notice = "500-line limit reached. Delete a line before adding more.".into();
             return false;
         }
-        if self.text.len() - (e - s) + value.len() > 1_000_000 {
-            self.notice = "Document exceeds the 1 MB text limit.".into();
+        if self.text.len() - (e - s) + value.len() > self.text_limit {
+            self.notice = "Document or workspace text limit reached. Save and close another tape, or remove text.".into();
             return false;
         }
         self.text.replace_range(s..e, value);
@@ -206,7 +248,8 @@ impl Editor {
             if l.kind == Kind::Rule {
                 return true;
             }
-            l.kind == Kind::Total && self.caret.column < l.raw.find('=').unwrap_or(l.raw.len())
+            l.kind == Kind::Total
+                && self.caret.column < l.raw.len() - engine::total_suffix(&l.raw).len()
         })
     }
     pub fn key(&mut self, c: char, f: &Format) {
@@ -282,6 +325,18 @@ impl Editor {
         self.record();
         self.replace(&s.replace("\r\n", "\n").replace('\r', "\n"));
         self.recalculate(f, false);
+        if self.notice.is_empty()
+            && s.lines().any(|row| {
+                let line = engine::parse(row, f, false);
+                line.kind == Kind::Value
+                    && line
+                        .comment
+                        .trim_start()
+                        .starts_with(['+', '-', '*', '/', '^'])
+            })
+        {
+            self.notice = "Paste inserts literal rows. For an expression, use a named value such as answer = 10+2*3.".into();
+        }
     }
     pub fn enter(&mut self, f: &Format) {
         self.record();
@@ -333,6 +388,7 @@ impl Editor {
         self.recalculate(f, false);
     }
     pub fn recalculate(&mut self, f: &Format, format_all: bool) {
+        let position = (self.caret, self.anchor);
         self.format = f.clone();
         self.tape = engine::calculate(&self.text, f);
         let mut replacements = Vec::new();
@@ -365,18 +421,57 @@ impl Editor {
         }
         // Apply from the end so offsets stay valid. Generated totals do not
         // change arithmetic; formatted operands still need re-evaluation.
+        let rendered_len = replacements
+            .iter()
+            .fold(self.text.len(), |len, (range, next)| {
+                len - range.len() + next.len()
+            });
+        if rendered_len > self.text_limit {
+            if let Some(before) = self.pending.take() {
+                let revision = self.text_revision;
+                self.restore(before, f);
+                self.text_revision = revision;
+            } else {
+                (self.caret, self.anchor) = position;
+                self.tape = engine::calculate(&self.text, f);
+            }
+            self.notice = "Formatting exceeds the document or workspace text limit.".into();
+            return;
+        }
         for (range, next) in replacements.into_iter().rev() {
             self.text.replace_range(range, &next);
         }
         if operands_changed {
             self.tape = engine::calculate(&self.text, f);
         }
+        let validation = if self.tape.lines.len() > limits::LINES {
+            Err("Document exceeds the 500-line limit.".into())
+        } else if self.text.len() > self.text_limit {
+            Err("Workspace text limit reached.".into())
+        } else {
+            Ok(())
+        };
+        if let Err(error) = validation
+            && let Some(before) = self.pending.take()
+        {
+            let revision = self.text_revision;
+            self.restore(before, f);
+            self.text_revision = revision;
+            self.notice = error;
+            return;
+        }
         self.finish_record();
     }
-    pub fn format_changed(&mut self, old: &Format, new: &Format) {
-        self.text = transcode(&self.text, old, new);
+    pub fn format_changed(&mut self, old: &Format, new: &Format) -> bool {
+        let converted = transcode(&self.text, old, new);
+        if converted.len() > self.text_limit || limits::text(&converted).is_err() {
+            self.notice = "Formatting exceeds the document or workspace text limit.".into();
+            return false;
+        }
+        self.text = converted;
         self.anchor = None;
         self.recalculate(new, true);
+        true
     }
     pub fn custom(&mut self, formula: &str, close: bool, f: &Format) {
         let formula = formula.replace("\\n", "\n");

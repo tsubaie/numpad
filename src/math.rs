@@ -1,8 +1,15 @@
 use bigdecimal::{BigDecimal as D, RoundingMode};
 use num_traits::{One, ToPrimitive, Zero};
-use std::{num::NonZeroU64, str::FromStr, sync::LazyLock};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, VecDeque},
+    num::NonZeroU64,
+    str::FromStr,
+    sync::LazyLock,
+};
 
 pub type Number = D;
+pub const MAX_SCALE: i64 = 512;
 static MAX_VALUE: LazyLock<D> = LazyLock::new(|| dec("1e32"));
 static EPSILON: LazyLock<D> = LazyLock::new(|| dec("1e-62"));
 static HALF: LazyLock<D> = LazyLock::new(|| dec("0.5"));
@@ -20,19 +27,43 @@ pub fn rounded(v: D) -> D {
     v.with_precision_round(NonZeroU64::new(60).unwrap(), RoundingMode::HalfUp)
 }
 pub fn checked(v: D) -> Result<D, String> {
-    if v.abs() >= *MAX_VALUE {
-        return Err("Number exceeds 32 integer digits".into());
-    }
+    validate(&v)?;
     Ok(rounded(v))
 }
+fn validate(v: &D) -> Result<(), String> {
+    // Inspect the scale before comparison, rounding or plain-string expansion.
+    // Significant precision and exponent bounds are separate constraints.
+    let raw_scale = v.fractional_digit_count();
+    if !(-MAX_SCALE - 60..=MAX_SCALE + 60).contains(&raw_scale) {
+        return Err("Decimal exponent is outside the supported range (-512 to 512)".into());
+    }
+    // Most values already fit. Normalize only the rounding guard digits;
+    // avoid allocating a new coefficient on every arithmetic operation.
+    let scale = if (-MAX_SCALE..=MAX_SCALE).contains(&raw_scale) {
+        raw_scale
+    } else {
+        v.normalized().fractional_digit_count()
+    };
+    if !(-MAX_SCALE..=MAX_SCALE).contains(&scale) {
+        return Err("Decimal exponent is outside the supported range (-512 to 512)".into());
+    }
+    if v.to_ref().abs() >= MAX_VALUE.to_ref() {
+        return Err("Number exceeds 32 integer digits".into());
+    }
+    Ok(())
+}
 pub fn div(a: &D, b: &D) -> Result<D, String> {
+    validate(a)?;
+    validate(b)?;
     if b.is_zero() {
         Err("Division by zero".into())
     } else {
-        Ok(rounded(a / b))
+        checked(a / b)
     }
 }
 pub fn binary(a: &D, b: &D, op: char) -> Result<D, String> {
+    validate(a)?;
+    validate(b)?;
     let v = match op {
         '+' => a + b,
         '-' => a - b,
@@ -44,6 +75,8 @@ pub fn binary(a: &D, b: &D, op: char) -> Result<D, String> {
     checked(v)
 }
 pub fn power(a: &D, b: &D) -> Result<D, String> {
+    validate(a)?;
+    validate(b)?;
     if b.abs() > 10000 {
         return Err("Exponent is too large".into());
     }
@@ -52,13 +85,21 @@ pub fn power(a: &D, b: &D) -> Result<D, String> {
         if a.is_zero() && n < 0 {
             return Err("Division by zero".into());
         }
-        if let (Some(x), Some(y)) = (a.abs().to_f64(), b.to_f64())
-            && x > 0.0
-            && x.log10() * y >= 32.0
-        {
-            return Err("Number exceeds 32 integer digits".into());
+        // Bound intermediate work as well as the final answer. powi() can
+        // construct enormous coefficients/scales before a final check runs.
+        let mut base = if n < 0 { div(&D::one(), a)? } else { a.clone() };
+        let mut remaining = n.unsigned_abs();
+        let mut result = D::one();
+        while remaining > 0 {
+            if remaining & 1 == 1 {
+                result = checked(result * &base)?;
+            }
+            remaining >>= 1;
+            if remaining > 0 {
+                base = checked(&base * &base)?;
+            }
         }
-        return checked(a.powi(n));
+        return Ok(result);
     }
     if b == &*HALF {
         return a
@@ -72,6 +113,7 @@ pub fn power(a: &D, b: &D) -> Result<D, String> {
     exponential(&rounded(logarithm(a)? * b))
 }
 pub fn logarithm(x: &D) -> Result<D, String> {
+    validate(x)?;
     if x <= &D::zero() {
         return Err("Logarithm needs a positive value".into());
     }
@@ -106,6 +148,7 @@ pub fn logarithm(x: &D) -> Result<D, String> {
     Ok(rounded(sum * 2 + D::from(n) * &*LN_TWO))
 }
 pub fn exponential(x: &D) -> Result<D, String> {
+    validate(x)?;
     if x > &D::from(74) {
         return Err("Number exceeds 32 integer digits".into());
     }
@@ -132,7 +175,9 @@ pub fn exponential(x: &D) -> Result<D, String> {
         sum = rounded(&sum * &sum);
     }
     if negative {
-        sum = div(&D::one(), &sum)?;
+        // This bounded internal intermediate may exceed the public magnitude
+        // limit even though its reciprocal is a valid small number.
+        sum = rounded(D::one() / &sum);
     }
     checked(sum)
 }
@@ -155,8 +200,39 @@ fn sin_cos(x: &D, cosine: bool) -> Result<D, String> {
     }
     Ok(rounded(sum))
 }
+#[derive(Default)]
+struct FunctionCache {
+    values: BTreeMap<(String, D), Result<D, String>>,
+    order: VecDeque<(String, D)>,
+}
+thread_local! { static FUNCTIONS: RefCell<FunctionCache> = RefCell::default(); }
 pub fn function(name: &str, x: &D) -> Result<D, String> {
-    match name.to_ascii_lowercase().as_str() {
+    validate(x)?;
+    let key = (name.to_ascii_lowercase(), x.normalized());
+    if !matches!(
+        key.0.as_str(),
+        "sqrt" | "abs" | "round" | "ln" | "log" | "exp" | "sin" | "cos" | "tan"
+    ) {
+        return Err(format!("Unknown function: {name}"));
+    }
+    if let Some(result) = FUNCTIONS.with(|cache| cache.borrow().values.get(&key).cloned()) {
+        return result;
+    }
+    let result = uncached_function(&key.0, x).and_then(checked);
+    FUNCTIONS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.values.len() == 1024
+            && let Some(old) = cache.order.pop_front()
+        {
+            cache.values.remove(&old);
+        }
+        cache.order.push_back(key.clone());
+        cache.values.insert(key, result.clone());
+    });
+    result
+}
+fn uncached_function(name: &str, x: &D) -> Result<D, String> {
+    match name {
         "sqrt" => x
             .sqrt()
             .map(rounded)

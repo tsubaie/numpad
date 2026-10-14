@@ -2,6 +2,97 @@ use iced::advanced::text::{Highlighter, highlighter};
 use iced::widget::canvas::{self, Frame, Geometry};
 use iced::{Color, Font, Point, Rectangle, Renderer, Size, Theme, mouse};
 use std::ops::Range;
+use std::sync::OnceLock;
+
+type CommentFace = Option<(String, iced::font::Style)>;
+static COMMENT_FONTS: OnceLock<[CommentFace; 2]> = OnceLock::new();
+
+pub fn initialize_fonts() {
+    // Initialize before highlighting: the renderer holds this same font-system
+    // lock while invoking the highlighter. Cache just two chosen family names.
+    COMMENT_FONTS.get_or_init(|| {
+        use iced::advanced::graphics::text::{cosmic_text::fontdb, font_system};
+        let mut system = font_system().write().expect("font system lock");
+        let db = system.raw().db();
+        [false, true].map(|mono| {
+            let generic = if mono {
+                fontdb::Family::Monospace
+            } else {
+                fontdb::Family::SansSerif
+            };
+            let preferred = if mono {
+                [
+                    "Consolas",
+                    "Menlo",
+                    "DejaVu Sans Mono",
+                    "Liberation Mono",
+                    "Adwaita Mono",
+                ]
+            } else {
+                [
+                    "Arial",
+                    "Helvetica",
+                    "Noto Sans",
+                    "DejaVu Sans",
+                    "Liberation Sans",
+                ]
+            };
+            let face = std::iter::once(generic)
+                .chain(preferred.iter().map(|name| fontdb::Family::Name(name)))
+                .find_map(|family| {
+                    let id = db.query(&fontdb::Query {
+                        families: &[family],
+                        style: fontdb::Style::Italic,
+                        ..Default::default()
+                    })?;
+                    db.face(id)
+                        .filter(|face| face.style != fontdb::Style::Normal)
+                })
+                .or_else(|| {
+                    db.faces().find(|face| {
+                        face.monospaced == mono
+                            && face.style != fontdb::Style::Normal
+                            && face.weight == fontdb::Weight::NORMAL
+                    })
+                });
+            face.and_then(|face| {
+                face.families.first().map(|(name, _)| {
+                    (
+                        name.clone(),
+                        if face.style == fontdb::Style::Oblique {
+                            iced::font::Style::Oblique
+                        } else {
+                            iced::font::Style::Italic
+                        },
+                    )
+                })
+            })
+        })
+    });
+}
+
+fn comment_font(mono: bool) -> Font {
+    let family = if mono {
+        iced::font::Family::Monospace
+    } else {
+        iced::font::Family::SansSerif
+    };
+    match COMMENT_FONTS
+        .get()
+        .and_then(|fonts| fonts[usize::from(mono)].as_ref())
+    {
+        Some((name, style)) => Font {
+            family: iced::font::Family::Name(name),
+            style: *style,
+            ..Font::DEFAULT
+        },
+        None => Font {
+            family,
+            style: iced::font::Style::Italic,
+            ..Font::DEFAULT
+        },
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Colors {
     pub background: Color,
@@ -10,6 +101,7 @@ pub struct Colors {
     pub header: Color,
     pub text: Color,
     pub muted: Color,
+    pub comment: Color,
     pub accent: Color,
     pub operator: Color,
     pub keypad: Color,
@@ -33,6 +125,7 @@ impl Colors {
                 header: hex(0x181825),
                 text: hex(0xcdd6f4),
                 muted: hex(0xa6adc8),
+                comment: hex(0xa6e3a1),
                 accent: hex(0xcba6f7),
                 operator: hex(0x45475a),
                 keypad: hex(0x313244),
@@ -50,6 +143,7 @@ impl Colors {
                 header: hex(0xf2f4f6),
                 text: hex(0x293640),
                 muted: hex(0x667784),
+                comment: hex(0x287a3d),
                 accent: hex(0x217d80),
                 operator: hex(0xe0f0f0),
                 keypad: hex(0xf2f4f6),
@@ -64,9 +158,41 @@ impl Colors {
 }
 #[derive(Clone, PartialEq)]
 pub struct HighlightSettings {
-    pub rows: Vec<u8>,
+    pub rows: Vec<HighlightRow>,
     pub mono: bool,
     pub colors: Colors,
+}
+#[derive(Clone, Copy, Default, PartialEq)]
+pub struct HighlightRow {
+    pub style: u8,
+    pub comment_start: Option<usize>,
+}
+impl HighlightRow {
+    pub fn from_line(line: &numpad::engine::Line) -> Self {
+        use numpad::engine::Kind;
+        let style = if line.error.is_some() {
+            3
+        } else {
+            match line.kind {
+                Kind::Total => 1,
+                Kind::Comment => 4,
+                Kind::Rule => 5,
+                Kind::Value if line.op == '-' => 2,
+                _ => 0,
+            }
+        };
+        let comment_start = if line.kind == Kind::Comment {
+            Some(0)
+        } else if !line.comment.is_empty() && line.raw.trim_end().ends_with(&line.comment) {
+            Some(line.raw.trim_end().len() - line.comment.len())
+        } else {
+            None
+        };
+        Self {
+            style,
+            comment_start,
+        }
+    }
 }
 pub struct TapeHighlighter {
     settings: HighlightSettings,
@@ -99,7 +225,12 @@ impl Highlighter for TapeHighlighter {
         self.line
     }
     fn highlight_line(&mut self, s: &str) -> Self::Iterator<'_> {
-        let style = self.settings.rows.get(self.line).copied().unwrap_or(0);
+        let row = self
+            .settings
+            .rows
+            .get(self.line)
+            .copied()
+            .unwrap_or_default();
         self.line += 1;
         let h = |style| Highlight {
             style,
@@ -107,36 +238,18 @@ impl Highlighter for TapeHighlighter {
             colors: self.settings.colors,
         };
         let mut spans = vec![];
-        if style == 1 || style == 3 || style == 4 {
-            spans.push((0..s.len(), h(style)));
-        } else {
-            let mut end = 0;
-            let mut started = false;
-            for (i, c) in s.char_indices() {
-                if !started {
-                    if c.is_ascii_digit() || c.is_ascii_alphabetic() {
-                        started = true;
-                        end = i + c.len_utf8();
-                    }
-                } else if c.is_whitespace() {
-                    break;
-                } else {
-                    end = i + c.len_utf8();
-                }
-            }
-            if end > 0 {
-                spans.push((
-                    0..end,
-                    h(if s.trim_start().starts_with('-') {
-                        2
-                    } else {
-                        0
-                    }),
-                ));
-                if end < s.len() {
-                    spans.push((end..s.len(), h(4)));
-                }
-            }
+        let start = row
+            .comment_start
+            .filter(|&i| i <= s.len() && s.is_char_boundary(i))
+            .unwrap_or(s.len());
+        if start > 0 {
+            spans.push((0..start, h(row.style)));
+        }
+        if start < s.len() {
+            spans.push((start..s.len(), h(4)));
+        }
+        if s.is_empty() {
+            spans.push((0..0, h(row.style)));
         }
         spans.into_iter()
     }
@@ -147,30 +260,36 @@ pub fn highlight(h: &Highlight, _: &Theme) -> highlighter::Format<Font> {
         color: Some(match h.style {
             1 => colors.accent,
             2 | 3 => colors.negative,
-            4 => colors.muted,
+            4 => colors.comment,
+            5 => colors.muted,
             _ => colors.text,
         }),
-        font: Some(Font {
-            family: if h.mono {
-                iced::font::Family::Monospace
-            } else {
-                iced::font::Family::SansSerif
-            },
-            weight: if h.style == 1 {
-                iced::font::Weight::Bold
-            } else {
-                iced::font::Weight::Normal
-            },
-            ..Font::DEFAULT
+        font: Some(if h.style == 4 {
+            comment_font(h.mono)
+        } else {
+            Font {
+                family: if h.mono {
+                    iced::font::Family::Monospace
+                } else {
+                    iced::font::Family::SansSerif
+                },
+                weight: if h.style == 1 {
+                    iced::font::Weight::Bold
+                } else {
+                    iced::font::Weight::Normal
+                },
+                ..Font::DEFAULT
+            }
         }),
     }
 }
+
 pub struct Paper {
     pub colors: Colors,
     pub ruled: bool,
     pub height: f32,
     pub active: usize,
-    pub scroll: usize,
+    pub scroll: f32,
     pub rows: Vec<u8>,
 }
 impl<Message> canvas::Program<Message> for Paper {
@@ -185,9 +304,21 @@ impl<Message> canvas::Program<Message> for Paper {
     ) -> Vec<Geometry> {
         let mut f = Frame::new(renderer, bounds.size());
         f.fill_rectangle(Point::ORIGIN, bounds.size(), self.colors.paper);
-        for i in 0..((bounds.height / self.height) as usize + 1) {
-            let y = 12.0 + i as f32 * self.height;
-            let index = i + self.scroll;
+        let first = (self.scroll / self.height).floor() as usize;
+        for i in 0..((bounds.height / self.height) as usize + 2) {
+            let index = first + i;
+            let y = 12.0 + index as f32 * self.height - self.scroll;
+            let total = self.rows.get(index) == Some(&2);
+            if total {
+                f.fill_rectangle(
+                    Point::new(0.0, y),
+                    Size::new(bounds.width, self.height),
+                    Color {
+                        a: 0.10,
+                        ..self.colors.accent
+                    },
+                );
+            }
             if index == self.active {
                 f.fill_rectangle(
                     Point::new(0.0, y),
@@ -211,11 +342,15 @@ impl<Message> canvas::Program<Message> for Paper {
                     },
                 );
             }
-            if self.ruled {
+            if self.ruled || total {
                 f.fill_rectangle(
                     Point::new(0.0, y + self.height - 1.0),
-                    Size::new(bounds.width, 1.0),
-                    self.colors.rule,
+                    Size::new(bounds.width, if total { 2.0 } else { 1.0 }),
+                    if total {
+                        self.colors.accent
+                    } else {
+                        self.colors.rule
+                    },
                 );
             }
         }
@@ -307,5 +442,44 @@ impl<Message> canvas::Program<Message> for Icon {
                 .with_line_join(canvas::LineJoin::Round),
         );
         vec![frame.into_geometry()]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn comments_are_italic_green_without_restyling_expressions_or_totals() {
+        initialize_fonts();
+        let tape = numpad::engine::calculate(
+            "100\n+15% tax note\n---\n+115 total note\n\nplain note\nx = 10+2",
+            &numpad::engine::Format::default(),
+        );
+        for dark in [false, true] {
+            let colors = Colors::new(dark);
+            let mut highlighter = TapeHighlighter::new(&HighlightSettings {
+                rows: tape.lines.iter().map(HighlightRow::from_line).collect(),
+                mono: true,
+                colors,
+            });
+            for line in &tape.lines {
+                let spans: Vec<_> = highlighter.highlight_line(&line.raw).collect();
+                for (range, h) in spans {
+                    let format = highlight(&h, &Theme::Light);
+                    if h.style == 4 {
+                        assert!(line.raw[range].contains("note"));
+                        assert_eq!(format.color, Some(colors.comment));
+                        assert!(matches!(
+                            format.font.unwrap().style,
+                            iced::font::Style::Italic | iced::font::Style::Oblique
+                        ));
+                    } else {
+                        assert_eq!(format.font.unwrap().style, iced::font::Style::Normal);
+                    }
+                }
+            }
+            assert_eq!(HighlightRow::from_line(&tape.lines[3]).style, 1);
+            assert_eq!(HighlightRow::from_line(&tape.lines[6]).style, 0);
+        }
     }
 }

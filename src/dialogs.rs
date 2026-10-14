@@ -450,8 +450,8 @@ pub(crate) mod tests {
             autosaved: true,
             workspace_revision: 0,
             autosave_pending: false,
+            recovery_protected: false,
             exit_request: None,
-            theme_watcher: system_theme::ThemeWatcher::new(),
             toast: None,
             copied: None,
             width: 1180.0,
@@ -466,6 +466,7 @@ pub(crate) mod tests {
             modified: false,
             revision: 0,
             pending_close: None,
+            saves: file_tasks::Saves::default(),
             modifiers: keyboard::Modifiers::default(),
             update_state: updates::State::default(),
         }
