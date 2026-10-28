@@ -6,3 +6,4 @@ Exec=numpad %f
 Icon=numpad
 Terminal=false
 Categories=Office;Calculator;
+StartupWMClass=numpad
