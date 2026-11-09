@@ -189,6 +189,12 @@ fn main() -> iced::Result {
                 let rgba = icon.into_rgba8();
                 window::icon::from_rgba(rgba.to_vec(), rgba.width(), rgba.height()).ok()
             }),
+            // Wayland app_id / X11 WM_CLASS; must match the .desktop file name.
+            #[cfg(target_os = "linux")]
+            platform_specific: window::settings::PlatformSpecific {
+                application_id: "numpad".to_owned(),
+                ..Default::default()
+            },
             ..Default::default()
         })
         .antialiasing(true)
